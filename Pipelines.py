@@ -9,11 +9,57 @@ import statsmodels.formula.api as smf
 from scipy.stats import spearmanr
 import math
 
+
+def calculate_diversity_ratio(adata, 
+                              gene_type_col='GeneType', 
+                              coding_label='protein_coding'):
+    
+    # Helper function: Calculate N80 for any given matrix
+    def _get_n80(matrix):
+        if matrix.shape[1] == 0: return np.zeros(matrix.shape[0])
+        sorted_expr = np.sort(matrix, axis=1)[:, ::-1]
+        cumsum = np.cumsum(sorted_expr, axis=1)
+        total_counts = cumsum[:, -1]
+        thresholds = total_counts * 0.8
+        n80 = np.argmax(cumsum >= thresholds[:, None], axis=1) + 1
+        n80[total_counts == 0] = 0
+        return n80
+
+    # ---------------------------------------------------------
+    X = adata.X  
+    print("Calculating NG80 (Total Library)...")
+    ng80 = _get_n80(X)
+    
+    print(f"Calculating NP80 (Subset: {coding_label})...")
+    if gene_type_col in adata.var.columns:
+        is_coding = adata.var[gene_type_col] == coding_label
+        if np.sum(is_coding) == 0:
+            print(f" [Warning] No genes found with type '{coding_label}'. NP80 set to 0.")
+            np80 = np.zeros(adata.n_obs)
+        else:
+            X_coding = X[:, is_coding.values] 
+            np80 = _get_n80(X_coding)
+    else:
+        print(f" [Warning] Column '{gene_type_col}' not found. Cannot calculate NP80.")
+        np80 = np.full(adata.n_obs, np.nan)
+        
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ratio = np80 / ng80
+        ratio[ng80 == 0] = 0
+    
+    return pd.DataFrame({
+        'NG80': ng80,
+        'NP80': np80,
+        'NP80_NG80_ratio': ratio
+    }, index=adata.obs_names)
+    
+    
 def calculate_bias_metrics(adata, layer=None, 
                            gene_type_col='GeneType', 
                            target_type='protein_coding',
                            gc_col='GC_Percent', 
-                           len_col='log10_Length'):
+                           len_col='log10_Length',
+                           platelet_col='is_platelet'):
 
     print(f"--- Calculating Bias Metrics (Target Layer: {layer if layer else 'X'}) ---")
     
@@ -97,17 +143,10 @@ def calculate_bias_metrics(adata, layer=None,
         else:
              print("  [Skip] No platelet genes identified in var.")
 
-    # 6. Basic stats
-    metrics_df['total_counts'] = np.ravel(X_data.sum(axis=1))
-    metrics_df['log1p_total_counts'] = np.log1p(metrics_df['total_counts'])
-    
     print("Calculation Done.\n")
     return metrics_df
 
 
-# ==============================================================================
-# 2. Class: Analysis Pipeline
-# ==============================================================================
 class RNASeqQCPipeline:
     def __init__(self, adata, 
                  bias_metrics_df=None,
@@ -174,20 +213,29 @@ class RNASeqQCPipeline:
 
     def set_layer(self, layer_name=None):
         if layer_name is None:
-            print("--- Set Layer: Using default X ---")
+            print("--- Set Layer: Using current X (default) ---")
         elif layer_name in self.adata.layers:
             print(f"--- Set Layer: Switching to '{layer_name}' ---")
             self.adata.X = self.adata.layers[layer_name].copy()
         else:
             raise ValueError(f"Layer '{layer_name}' not found.")
 
-        # Reset PCA
+        n_vars_before = self.adata.n_vars
+        sc.pp.filter_genes(self.adata, min_cells=1)
+        n_vars_after = self.adata.n_vars
+        
+        if n_vars_before > n_vars_after:
+            print(f"   [Filtering] Dropped {n_vars_before - n_vars_after} genes with 0 expression in this layer.")
+            print(f"   Remaining genes: {n_vars_after}")
+        else:
+            print("   [Filtering] No zero-expression genes found.")
+
         for key in ['X_pca', 'pca', 'PCs']:
             if key in self.adata.obsm: del self.adata.obsm[key]
             if key in self.adata.uns: del self.adata.uns[key]
             if key in self.adata.varm: del self.adata.varm[key]
-        print(f"  PCA reset. Active layer ready.")
-
+        
+        print(f"   PCA reset. Active layer ready.\n")
     def run_pca_diagnostics(self):
         if 'X_pca' not in self.adata.obsm: 
             sc.tl.pca(self.adata)
@@ -211,12 +259,42 @@ class RNASeqQCPipeline:
         
         plt.tight_layout(); plt.show()
 
+        # ==============================================================================
+        # [수정] 배치 레이블 단순화 (Legend 찌그러짐 방지)
+        # ==============================================================================
+        batch_col = self.cols['batch']
+        plot_batch_key = batch_col  # 기본은 원본 사용
+
+        if batch_col in self.adata.obs.columns:
+            # (데이터 타입이 category면 .categories, 아니면 .unique() 사용)
+            if hasattr(self.adata.obs[batch_col], 'cat'):
+                unique_batches = self.adata.obs[batch_col].cat.categories
+            else:
+                unique_batches = self.adata.obs[batch_col].unique()
+            
+            # 2. 매핑 딕셔너리 생성 (Original Name -> batch_1, batch_2 ...)
+            batch_map = {orig: f"batch_{i+1}" for i, orig in enumerate(unique_batches)}
+            
+            simple_batch_key = f"{batch_col}_simple"
+            self.adata.obs[simple_batch_key] = self.adata.obs[batch_col].map(batch_map).astype('category')
+            
+            print(f"\n[Info] Simplified batch labels for plotting (Original -> Simple):")
+            for orig, simple in batch_map.items():
+                print(f"  * {simple} : {orig}")
+            
+            # 플롯 키를 단순화된 컬럼으로 교체
+            plot_batch_key = simple_batch_key
+        # ==============================================================================
+
         # 3. Scatter Plots
-        print("--- [Analysis] PCA Scatter Plots ---")
+        print("\n--- [Analysis] PCA Scatter Plots ---")
         pc1_var = var_ratios[0]
         pc2_var = var_ratios[1]
         
-        plot_keys = active_metrics + [self.cols['phenotype'], self.cols['batch']]
+        # plot_keys 구성 시 원본 batch 컬럼 대신, 단순화된 plot_batch_key 사용
+        plot_keys = active_metrics + [self.cols['phenotype']]
+        if plot_batch_key not in plot_keys: # 중복 방지
+            plot_keys.append(plot_batch_key)
         
         n_cols = 3
         n_rows = math.ceil(len(plot_keys) / n_cols)
@@ -227,16 +305,23 @@ class RNASeqQCPipeline:
             if key not in self.adata.obs.columns: continue
             
             is_numeric = pd.api.types.is_numeric_dtype(self.adata.obs[key])
+            
+            # 단순화된 배치 컬럼일 경우 제목에 알림
+            title = key
+            if key == plot_batch_key and key != batch_col:
+                title = f"Batch (Simplified)"
+
             sc.pl.pca(
                 self.adata, color=key, ax=axes_pca[i], show=False, 
                 cmap='RdBu_r' if is_numeric else None,
-                size=100, legend_loc='right margin'
+                size=100, legend_loc='right margin', 
+                title=title # 제목 설정
             )
             axes_pca[i].set_xlabel(f"PC1 ({pc1_var:.1%})")
             axes_pca[i].set_ylabel(f"PC2 ({pc2_var:.1%})")
             
         for j in range(i+1, len(axes_pca)): axes_pca[j].axis('off')
-        plt.tight_layout(); plt.show()
+        plt.tight_layout(); plt.show()  
 
     def analyze_pc_associations(self, n_pcs=5):
         if 'X_pca' not in self.adata.obsm: sc.tl.pca(self.adata)
