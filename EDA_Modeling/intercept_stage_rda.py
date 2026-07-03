@@ -18,6 +18,7 @@ downstream disease scoring.
 Usage (run from EDA_Modeling/, cwd assumption per project convention):
     python intercept_stage_rda.py
 """
+import os
 import sys
 from pathlib import Path
 
@@ -44,30 +45,36 @@ def main():
 
     intercept_genes = summary.loc[summary["stage"] == "intercept", "gene"].tolist()
     print(f"intercept-stage genes: {len(intercept_genes)}")
-    nz_lo, nz_hi = summary.loc[summary["stage"] == "intercept", "nz"].agg(["min", "max"])
-    control_genes = summary.loc[(summary["stage"] == "nbi") &
-                                (summary["nz"] >= nz_lo) & (summary["nz"] <= nz_hi), "gene"].tolist()
-    print(f"nz-matched nbi control genes ({nz_lo}<=nz<={nz_hi}): {len(control_genes)}")
 
-    adata = sc.read_h5ad(config.H5AD_PATH)
-    m = ((adata.obs["QC_Passed"] == True) & (adata.obs["Phenotype_Processed"].notna()) &
-         (adata.obs["Phenotype_Processed"] != "Unknown") &
-         (adata.obs["broad_protocol_category"] != "Exome-based (EB)"))
-    adata = adata[m]
+    rda_cache = OUT_DIR / "intercept_stage_rda.csv"
+    if os.path.isfile(rda_cache):
+        print(f"Loading cached RDA result -> {rda_cache}")
+        df_detail = pd.read_csv(rda_cache)
+    else:
+        nz_lo, nz_hi = summary.loc[summary["stage"] == "intercept", "nz"].agg(["min", "max"])
+        control_genes = summary.loc[(summary["stage"] == "nbi") &
+                                    (summary["nz"] >= nz_lo) & (summary["nz"] <= nz_hi), "gene"].tolist()
+        print(f"nz-matched nbi control genes ({nz_lo}<=nz<={nz_hi}): {len(control_genes)}")
 
-    all_genes = intercept_genes + control_genes
-    adata_sub = adata[:, adata.var_names.isin(all_genes)].copy()
-    print(f"Genes found in adata: {adata_sub.n_vars} / {len(all_genes)}")
+        adata = sc.read_h5ad(config.H5AD_PATH)
+        m = ((adata.obs["QC_Passed"] == True) & (adata.obs["Phenotype_Processed"].notna()) &
+             (adata.obs["Phenotype_Processed"] != "Unknown") &
+             (adata.obs["broad_protocol_category"] != "Exome-based (EB)"))
+        adata = adata[m]
 
-    df_detail, _ = compute_gene_wise_bias_rda(
-        adata_sub, bias_metrics=config.BIAS_COLUMNS, layer="CPM_log1p",
-        phenotype_col="Phenotype_Processed", target_labels="Healthy Control",
-        group_name="intercept_vs_nbi_control", min_expressed_frac=0.0,
-    )
-    df_detail["group"] = np.where(df_detail["Gene"].isin(intercept_genes), "intercept", "nbi_control")
-    nz_map = summary.set_index("gene")["nz"]
-    df_detail["nz"] = df_detail["Gene"].map(nz_map)
-    df_detail.to_csv(OUT_DIR / "intercept_stage_rda.csv", index=False)
+        all_genes = intercept_genes + control_genes
+        adata_sub = adata[:, adata.var_names.isin(all_genes)].copy()
+        print(f"Genes found in adata: {adata_sub.n_vars} / {len(all_genes)}")
+
+        df_detail, _ = compute_gene_wise_bias_rda(
+            adata_sub, bias_metrics=config.BIAS_COLUMNS, layer="CPM_log1p",
+            phenotype_col="Phenotype_Processed", target_labels="Healthy Control",
+            group_name="intercept_vs_nbi_control", min_expressed_frac=0.0,
+        )
+        df_detail["group"] = np.where(df_detail["Gene"].isin(intercept_genes), "intercept", "nbi_control")
+        nz_map = summary.set_index("gene")["nz"]
+        df_detail["nz"] = df_detail["Gene"].map(nz_map)
+        df_detail.to_csv(rda_cache, index=False)
 
     print("\nJoint R^2 (all biases combined) by group:")
     print(df_detail.groupby("group")["Joint_R2_All_Biases"].describe().to_string())
@@ -85,16 +92,18 @@ def main():
          "fit failure rather than covariate-insensitivity -- recommend excluding from downstream scoring):")
     print(exceptions[["Gene", "nz", "Joint_R2_All_Biases", "fail_reason", "nbi_explode"]].to_string(index=False))
 
+    NZ_LABEL = "HC Non-zero counts"
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     ax = axes[0]
-    for grp, color in [("intercept", "#1b9e77"), ("nbi_control", "#c3c3c3")]:
-        vals = df_detail.loc[df_detail["group"] == grp, "Joint_R2_All_Biases"]
-        ax.hist(vals, bins=25, alpha=0.6, color=color, label=f"{grp} (n={len(vals)})", density=True)
-    ax.axvline(R2_EXCEPTION_THR, color="#d95f02", ls="--", lw=1.5,
-              label=f"exception threshold ({R2_EXCEPTION_THR})")
-    ax.set(xlabel="Joint R2 (all 10 covariates, HC)", ylabel="density",
-          title="Covariate-explained variance:\nintercept-stage vs nz-matched nbi-stage")
-    ax.legend(fontsize=8)
+    for grp, label, color in [("intercept", "Intercept stage", "#1b9e77"),
+                              ("nbi_control", "GAMLSS mu+sigma stage (nz-matched)", "#c3c3c3")]:
+        vals = df_detail.loc[df_detail["group"] == grp, "nz"]
+        ax.hist(vals, bins=25, alpha=0.6, color=color, label=f"{label} (n={len(vals)})", density=True)
+    exc_nz = df_detail.loc[df_detail["is_exception"], "nz"]
+    for v in exc_nz:
+        ax.axvline(v, color="#d95f02", ls="-", lw=0.8, alpha=0.7)
+    ax.set(xlabel=NZ_LABEL, ylabel="Density")
+    ax.legend(loc="lower right", fontsize=10)
 
     ax = axes[1]
     colors = np.where(df_detail["is_exception"], "#d95f02",
@@ -102,26 +111,25 @@ def main():
     ax.scatter(df_detail["nz"], df_detail["Joint_R2_All_Biases"], c=colors, s=14, alpha=0.7)
     for _, r in exceptions.iterrows():
         ax.annotate(r["Gene"].split(".")[0], (r["nz"], r["Joint_R2_All_Biases"]),
-                   fontsize=7, xytext=(4, 4), textcoords="offset points", color="#d95f02")
+                   xytext=(4, 4), textcoords="offset points", color="#d95f02")
 
     int_nz = df_detail.loc[df_detail["group"] == "intercept", "nz"]
     ax.plot([int_nz.min(), int_nz.max()], [R2_EXCEPTION_THR] * 2,
-           color="#d95f02", ls="--", lw=1.5, label="exception threshold (intercept-stage only)")
-    ax.set(xlabel="nz (HC nonzero count)", ylabel="Joint R2")
-    ax.title.set_fontsize(11)
-    ax.legend(fontsize=7, loc="upper left")
+           color="#d95f02", ls="--", lw=1.5, label="Exception threshold (intercept stage only)")
+    ax.set(xlabel=NZ_LABEL, ylabel="Joint R2")
+    ax.legend(loc="lower right", fontsize=10)
 
     fig.tight_layout()
     fig.savefig(FIG_DIR / "intercept_stage_rda.png", dpi=150)
-    plt.show()
+    plt.close(fig)
     print(f"\nSaved -> {OUT_DIR}/intercept_stage_rda.csv (with is_exception column)")
     print(f"Saved -> {OUT_DIR}/intercept_stage_exceptions.csv")
     print(f"Saved -> {FIG_DIR}/intercept_stage_rda.png")
-
-    # Raw HC count distribution (per-study) for the excluded genes -- do these
-    # high-Joint-R2 exceptions actually look like the study-clustered,
-    # non-smooth patterns already seen in the sigma-explode nz>200 cases, or is
-    # this a different failure mode?
+    adata = sc.read_h5ad(config.H5AD_PATH)
+    m = ((adata.obs["QC_Passed"] == True) & (adata.obs["Phenotype_Processed"].notna()) &
+         (adata.obs["Phenotype_Processed"] != "Unknown") &
+         (adata.obs["broad_protocol_category"] != "Exome-based (EB)"))
+    adata = adata[m]
     adata_exc = adata[adata.obs["Phenotype_Processed"].astype(str) == "Healthy Control",
                       adata.var_names.isin(exceptions["Gene"])]
     X_exc = adata_exc.X.toarray() if hasattr(adata_exc.X, "toarray") else np.asarray(adata_exc.X)
@@ -146,16 +154,17 @@ def main():
             if len(ys) < 2:
                 continue
             ax.hist(ys, bins=20, alpha=0.55, color=scolor[s], label=s)
-        ax.set_title(f"{gsym[g]}\n({g})  nz={int(r['nz'])}  R2={r['Joint_R2_All_Biases']:.2f}", fontsize=9)
-        ax.set_xlabel("log1p(raw count) | count>0")
-        ax.set_ylabel("n samples")
+        label = f"{gsym[g]} ({g})\nHC Non-zero counts: {int(r['nz'])}\nJoint R2: {r['Joint_R2_All_Biases']:.2f}"
+        ax.annotate(label, xy=(0.03, 0.03), xycoords="axes fraction", ha="left", va="bottom")
+        ax.set_xlabel("Log1p(raw count), detected samples only")
+        ax.set_ylabel("Number of samples")
     for ax in axes2[n_g:]:
         ax.axis("off")
     handles, labels = axes2[0].get_legend_handles_labels()
-    fig2.legend(handles, labels, loc="upper center", ncol=len(studies), bbox_to_anchor=(0.5, 1.02), fontsize=9)
+    fig2.legend(handles, labels, loc="lower center", ncol=len(studies), bbox_to_anchor=(0.5, -0.04))
     fig2.tight_layout()
     fig2.savefig(FIG_DIR / "intercept_stage_exceptions_raw_hist.png", dpi=150, bbox_inches="tight")
-    plt.show()
+    plt.close(fig2)
     print(f"Saved -> {FIG_DIR}/intercept_stage_exceptions_raw_hist.png")
 
 

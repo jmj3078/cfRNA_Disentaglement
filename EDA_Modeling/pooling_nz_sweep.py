@@ -8,6 +8,7 @@ scored via cv_pool-style held-out RQR. No R/GAMLSS involved, so this runs fast.
 Usage (run from EDA_Modeling/, cwd assumption per project convention):
     python pooling_nz_sweep.py
 """
+import os
 import sys
 from pathlib import Path
 
@@ -102,82 +103,86 @@ def cv_pool_sweep(Y, Xs, gene_cols, folds, rare_overdisp_thr, seed):
 
 
 def main():
-    print("Loading HC data...")
-    Xs, Y, names, strata = load_hc()
-    nz = (Y > 0).sum(0).astype(int)
-    n_hc = Xs.shape[0]
-    folds = list(StratifiedKFold(MP2["n_splits"], shuffle=True, random_state=SEED)
-                .split(np.zeros(n_hc), strata))
-    print(f"HC={n_hc}  protein-coding genes={len(names)}")
+    summary_cache = OUT_DIR / "pooling_nz_sweep_summary.csv"
+    per_gene_cache = OUT_DIR / "pooling_nz_sweep_per_gene.csv"
+    if os.path.isfile(summary_cache) and os.path.isfile(per_gene_cache):
+        print(f"Loading cached sweep result -> {summary_cache}")
+        summary = pd.read_csv(summary_cache)
+    else:
+        print("Loading HC data...")
+        Xs, Y, names, strata = load_hc()
+        nz = (Y > 0).sum(0).astype(int)
+        n_hc = Xs.shape[0]
+        folds = list(StratifiedKFold(MP2["n_splits"], shuffle=True, random_state=SEED)
+                    .split(np.zeros(n_hc), strata))
+        print(f"HC={n_hc}  protein-coding genes={len(names)}")
 
-    rows = []
-    per_gene_rows = []
-    for T in NZ_THRESHOLDS:
-        gene_cols = np.where(nz < T)[0]
-        if len(gene_cols) < 5:
-            print(f"nz<{T}: only {len(gene_cols)} genes, skipping")
-            continue
-        print(f"nz<{T}: pooling {len(gene_cols)} genes...")
-        z = cv_pool_sweep(Y, Xs, gene_cols, folds, MP2["rare_overdisp_thr"], SEED)
-
-        gene_w1, gene_skew, gene_kurt, gene_std = [], [], [], []
-        for gi, col in enumerate(gene_cols):
-            v = z[:, gi]
-            v = v[np.isfinite(v)]
-            if len(v) < 8:
+        rows = []
+        per_gene_rows = []
+        for T in NZ_THRESHOLDS:
+            gene_cols = np.where(nz < T)[0]
+            if len(gene_cols) < 5:
+                print(f"nz<{T}: only {len(gene_cols)} genes, skipping")
                 continue
-            gene_w1.append(_w1_normal(v))
-            gene_skew.append(float(skew(v)))
-            gene_kurt.append(float(kurtosis(v)))
-            gene_std.append(float(v.std()))
-            per_gene_rows.append(dict(nz_threshold=T, gene=names[col], nz=int(nz[col]),
-                                      w1=gene_w1[-1], skew_z=gene_skew[-1],
-                                      kurt_z=gene_kurt[-1], std_z=gene_std[-1]))
+            print(f"nz<{T}: pooling {len(gene_cols)} genes...")
+            z = cv_pool_sweep(Y, Xs, gene_cols, folds, MP2["rare_overdisp_thr"], SEED)
 
-        rows.append(dict(
-            nz_threshold=T, n_genes=len(gene_cols),
-            w1_median=np.median(gene_w1), w1_p90=np.percentile(gene_w1, 90),
-            skew_median=np.median(gene_skew), kurt_median=np.median(gene_kurt),
-            std_median=np.median(gene_std),
-        ))
+            gene_w1, gene_skew, gene_kurt, gene_std = [], [], [], []
+            for gi, col in enumerate(gene_cols):
+                v = z[:, gi]
+                v = v[np.isfinite(v)]
+                if len(v) < 8:
+                    continue
+                gene_w1.append(_w1_normal(v))
+                gene_skew.append(float(skew(v)))
+                gene_kurt.append(float(kurtosis(v)))
+                gene_std.append(float(v.std()))
+                per_gene_rows.append(dict(nz_threshold=T, gene=names[col], nz=int(nz[col]),
+                                          w1=gene_w1[-1], skew_z=gene_skew[-1],
+                                          kurt_z=gene_kurt[-1], std_z=gene_std[-1]))
 
-    summary = pd.DataFrame(rows)
-    per_gene = pd.DataFrame(per_gene_rows)
-    summary.to_csv(OUT_DIR / "pooling_nz_sweep_summary.csv", index=False)
-    per_gene.to_csv(OUT_DIR / "pooling_nz_sweep_per_gene.csv", index=False)
+            rows.append(dict(
+                nz_threshold=T, n_genes=len(gene_cols),
+                w1_median=np.median(gene_w1), w1_p90=np.percentile(gene_w1, 90),
+                skew_median=np.median(gene_skew), kurt_median=np.median(gene_kurt),
+                std_median=np.median(gene_std),
+            ))
+
+        summary = pd.DataFrame(rows)
+        per_gene = pd.DataFrame(per_gene_rows)
+        summary.to_csv(summary_cache, index=False)
+        per_gene.to_csv(per_gene_cache, index=False)
     print("\n" + summary.round(3).to_string(index=False))
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
     nz_a = MP2["nz_a_max"]
+    POOL_THR_LABEL = "Pooling threshold (HC Non-zero counts)"
 
     ax = axes[0]
-    ax.plot(summary["nz_threshold"], summary["w1_median"], "-o", color="#7570b3", label="median W1")
+    ax.plot(summary["nz_threshold"], summary["w1_median"], "-o", color="#7570b3", label="Median W1")
     ax.plot(summary["nz_threshold"], summary["w1_p90"], "-o", color="#d95f02", label="90th pct W1")
-    ax.axvline(nz_a, color="k", ls="--", lw=1, label=f"nz_a_max={nz_a} (current)")
-    ax.set(xlabel="nz threshold (pool = genes with nz < threshold)", ylabel="W1 (held-out CV)",
-          title="Pooling calibration (W1) vs nz threshold")
-    ax.legend(fontsize=8)
+    ax.axvline(nz_a, color="k", ls="--", lw=1, label=f"Current pooling threshold ({nz_a})")
+    ax.set(xlabel=POOL_THR_LABEL, ylabel="W1 (held-out CV)")
+    ax.legend(loc="upper left")
 
     ax = axes[1]
-    ax.plot(summary["nz_threshold"], summary["skew_median"], "-o", color="#1b9e77", label="median skew_z")
-    ax.plot(summary["nz_threshold"], summary["kurt_median"], "-o", color="#e7298a", label="median kurt_z")
+    ax.plot(summary["nz_threshold"], summary["skew_median"], "-o", color="#1b9e77", label="Median skew")
+    ax.plot(summary["nz_threshold"], summary["kurt_median"], "-o", color="#e7298a", label="Median kurtosis")
     ax.axhline(0, color="gray", ls=":", lw=1)
     ax.axvline(nz_a, color="k", ls="--", lw=1)
-    ax.set(xlabel="nz threshold", ylabel="skew_z / kurt_z (held-out)",
-          title="Higher moments vs nz threshold")
-    ax.legend(fontsize=8)
+    ax.set(xlabel=POOL_THR_LABEL, ylabel="Skew / kurtosis (held-out)")
+    ax.legend(loc="upper left")
 
     ax = axes[2]
     ax.plot(summary["nz_threshold"], summary["std_median"], "-o", color="#66a61e")
-    ax.axhline(1.0, color="k", ls=":", lw=1, label="calibrated (std=1)")
-    ax.axvline(nz_a, color="k", ls="--", lw=1, label=f"nz_a_max={nz_a}")
-    ax.set(xlabel="nz threshold", ylabel="median std(z) (held-out)",
-          title="RQR spread vs nz threshold")
-    ax.legend(fontsize=8)
+    ax.axhline(1.0, color="k", ls=":", lw=1, label="Calibrated (std=1)")
+    ax.axvline(nz_a, color="k", ls="--", lw=1, label=f"Current pooling threshold ({nz_a})")
+    ax.set(xlabel=POOL_THR_LABEL, ylabel="Median std(z) (held-out)")
+    ax.legend(loc="upper left")
 
     fig.tight_layout()
     fig.savefig(FIG_DIR / "pooling_nz_sweep.png", dpi=150)
-    plt.show()
+    plt.close(fig)
     print(f"\nSaved -> {OUT_DIR}/pooling_nz_sweep_summary.csv, pooling_nz_sweep_per_gene.csv")
     print(f"Saved -> {FIG_DIR}/pooling_nz_sweep.png")
 

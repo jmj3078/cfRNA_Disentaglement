@@ -14,6 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **주석**: 영어로만 작성. 단, 사용자가 명시적으로 요청하기 전에는 주석을 달지 않는다 (작업 최종 완료 후 일괄 추가 예정).
 - **import 순서**: 알파벳 순.
 - **경로·재사용 변수**: 절대 재선언하지 말고 루트 `config.py`에서 전역 import (구조는 아래 디렉토리 트리 참조).
+- **캐시 우선 로딩**: 시각화·분석 스크립트에서 재계산 비용이 큰 중간 산출물(CV 결과, gene-wise 통계 등)은 항상 저장된 캐시 파일(csv/pkl)이 있으면 그걸 먼저 불러오고, 없을 때만 재계산 후 저장하는 로직을 기본으로 넣는다 (`modeling_criteria_eda.ipynb` Section 4의 `if os.path.isfile(...): load else: compute+save` 패턴 참고).
 - **시각화**: 모든 그림은 `apply_style()`로 공통 테마 적용. 노트북/스크립트 위치 기준으로 아래 패턴 사용.
   ```python
   if parent_dir not in sys.path:
