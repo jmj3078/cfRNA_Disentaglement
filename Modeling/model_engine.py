@@ -1,41 +1,4 @@
-"""Gene-level normative model branching engine.
-
-Branch assignment
------------------
-  det_rate < low_det_thr (default 0.10)
-      -> "logistic"  : L2 Logistic Regression
-         z-score: Bernoulli RQR from P(detected | X)
-
-  det_rate >= low_det_thr  AND  mean_count >= mean_count_min (default 2.0)
-      -> count_model ("nbi" or "zinbi")  : NBI / ZINBI GAMLSS
-         z-score: NBI / ZINBI full quantile residual
-
-Outputs
--------
-  score() returns a dict:
-    "logistic" : (n_test, n_logistic)  -- low-det gene anomaly matrix  [SEPARATE]
-    "count"    : (n_test, n_count)     -- high-det gene anomaly matrix
-    "combined" : (n_test, n_all)       -- concatenated (logistic | count)
-    "logistic_gene_names" / "count_gene_names" / "gene_names"
-
-  save(directory) writes:
-    genes.pkl, scaler.pkl, config.pkl
-    training_summary.csv    -- per-gene branch, fit_ok, n_removed
-    training_failures.csv   -- genes where fit_ok == False (for root-cause analysis)
-
-Typical workflow
-----------------
-  engine = NormativeModelEngine(count_model="nbi")   # or "zinbi"
-  engine.load_hc_data()
-  engine.assign_branches()
-  engine.train(verbose=True)
-  engine.save("engine_state/")
-
-  result = engine.score(X_disease_raw, Y_disease, gene_names=order)
-  Z_low  = result["logistic"]   # low-det matrix (separate)
-  Z_high = result["count"]      # high-det matrix
-  Z_all  = result["combined"]
-"""
+"""NZ-gated normative model engine (normative-v2)"""
 
 import pickle
 import sys
@@ -52,69 +15,54 @@ import statsmodels.api as sm
 from rpy2.robjects.conversion import localconverter
 from scipy.sparse import issparse
 from scipy.stats import nbinom, norm, poisson
-from sklearn.exceptions import ConvergenceWarning
-from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from statsmodels.discrete.discrete_model import NegativeBinomial
 
-warnings.filterwarnings("ignore", category=ConvergenceWarning)
 warnings.filterwarnings("ignore", category=UserWarning, module="rpy2")
-warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
 
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 import config
+from dispersion_trend import build_trend, load_trend, save_trend
 
-LOW_DET_THR = config.MODELING_PARAMS["low_det_thr"]
-DET_RATE_MIN = config.MODELING_PARAMS["det_rate_min"]
-RARE_DET_MAX = config.MODELING_PARAMS["rare_det_max"]
-RARE_OVERDISP_THR = config.MODELING_PARAMS["rare_overdisp_thr"]
-RARE_Z_CAP = config.MODELING_PARAMS["rare_z_cap"]
-MEAN_COUNT_MIN = config.MODELING_PARAMS["mean_count_min"]
-LR_C = config.MODELING_PARAMS["lr_c"]
-LR_MAX_ITER = config.MODELING_PARAMS["lr_max_iter"]
+MP2 = config.MODELING_PARAMS_V2
 
 
-# ---- Pure-Python scoring helpers ----------------------------------------
-
-def _bernoulli_rqr(p_detect, y, seed=None):
-    """Bernoulli RQR: z ~ N(0,1) when P(Y>0) = p_detect is correct."""
-    detected = y > 0
-    a = np.where(detected, 1.0 - p_detect, 0.0)
-    b = np.where(detected, 1.0, 1.0 - p_detect)
-    lo = np.clip(np.minimum(a, b), 1e-8, 1 - 1e-8)
-    hi = np.clip(np.maximum(a, b), 1e-8, 1 - 1e-8)
-    rng = np.random.default_rng(seed)
-    return norm.ppf(rng.uniform(lo, hi)).astype(np.float32)
-
+# ---- Pure-Python RQR helpers (mirrors model_engine.py) ------------------
 
 def _poisson_rqr(y, mu, seed=None):
-    """Poisson RQR: z ~ N(0,1) when Y ~ Poisson(mu)."""
     y = np.asarray(y)
     lo = np.where(y > 0, poisson.cdf(y - 1, mu), 0.0)
     hi = poisson.cdf(y, mu)
-    lo = np.clip(lo, 1e-12, 1 - 1e-12)
-    hi = np.clip(hi, 1e-12, 1 - 1e-12)
+    lo = np.clip(lo, 1e-12, 1 - 1e-12); hi = np.clip(hi, 1e-12, 1 - 1e-12)
     rng = np.random.default_rng(seed)
     return norm.ppf(rng.uniform(np.minimum(lo, hi), np.maximum(lo, hi))).astype(np.float32)
 
 
 def _nb_rqr(y, mu, alpha, seed=None):
-    """Negative-binomial RQR (statsmodels alpha parameterization: var = mu + alpha*mu^2)."""
     y = np.asarray(y)
     n = 1.0 / alpha
     p = np.clip(n / (n + mu), 1e-12, 1 - 1e-12)
     lo = np.where(y > 0, nbinom.cdf(y - 1, n, p), 0.0)
     hi = nbinom.cdf(y, n, p)
-    lo = np.clip(lo, 1e-12, 1 - 1e-12)
-    hi = np.clip(hi, 1e-12, 1 - 1e-12)
+    lo = np.clip(lo, 1e-12, 1 - 1e-12); hi = np.clip(hi, 1e-12, 1 - 1e-12)
     rng = np.random.default_rng(seed)
     return norm.ppf(rng.uniform(np.minimum(lo, hi), np.maximum(lo, hi))).astype(np.float32)
 
 
+def _w1_normal(z):
+    """Mean abs deviation between sorted z and theoretical N(0,1) quantiles.
+    Guideline (cv_gamlss_nb.py): > 0.25 indicates poor calibration."""
+    v = z[np.isfinite(z)]
+    n = len(v)
+    if n < 8:
+        return np.nan
+    ref = norm.ppf(np.linspace(1 / (2 * n), 1 - 1 / (2 * n), n))
+    return float(np.mean(np.abs(np.sort(v) - ref)))
+
+
 def _nbi_rqr_from_coeffs(mu_coef, sigma_coef, X_test, y_test, seed=None):
-    """gamlss NBI: log(mu)=X@mu_coef, log(sigma)=X@sigma_coef, theta=1/sigma."""
     n = len(y_test)
     Xa = np.column_stack([np.ones(n), X_test])
     mu = np.exp(Xa @ mu_coef).clip(1e-4, 1e6)
@@ -130,36 +78,13 @@ def _nbi_rqr_from_coeffs(mu_coef, sigma_coef, X_test, y_test, seed=None):
     return norm.ppf(rng.uniform(lo, hi)).astype(np.float32)
 
 
-def _zinbi_rqr_from_coeffs(mu_coef, sigma_coef, nu_coef, X_test, y_test, seed=None):
-    """ZINBI full z-score: F_ZINBI(k) = nu + (1-nu)*F_NBI(k)."""
-    n = len(y_test)
-    Xa = np.column_stack([np.ones(n), X_test])
-    mu = np.exp(Xa @ mu_coef).clip(1e-4, 1e6)
-    sigma = np.exp(Xa @ sigma_coef).clip(1e-8, 1e3)
-    theta = (1.0 / sigma).clip(1e-4, 1e4)
-    p_nb = np.clip(theta / (theta + mu), 1e-8, 1 - 1e-8)
-    # nu: intercept-only (1 element) or per-sample
-    nu = np.full(n, 1.0 / (1.0 + np.exp(-nu_coef[0]))) if len(nu_coef) == 1 \
-        else 1.0 / (1.0 + np.exp(-Xa @ nu_coef))
-    nu = np.clip(nu, 1e-8, 1 - 1e-8)
-    yi = np.asarray(y_test, dtype=int)
-    fn1 = np.where(yi > 0, nbinom.cdf(yi - 1, n=theta, p=p_nb), 0.0)
-    fn = nbinom.cdf(yi, n=theta, p=p_nb)
-    a = np.where(yi > 0, nu + (1 - nu) * fn1, 0.0)
-    b = nu + (1 - nu) * fn
-    lo = np.clip(np.minimum(a, b), 1e-8, 1 - 1e-8)
-    hi = np.clip(np.maximum(a, b), 1e-8, 1 - 1e-8)
-    rng = np.random.default_rng(seed)
-    return norm.ppf(rng.uniform(lo, hi)).astype(np.float32)
-
-
-# ---- rpy2 helpers -------------------------------------------------------
+# ---- rpy2 helpers ---------------------------------------------------------
 
 def _to_r_matrix(arr, col_names):
     with localconverter(ro.default_converter + rpyn.converter):
         r_mat = ro.conversion.py2rpy(np.ascontiguousarray(arr, dtype=np.float64))
     return ro.r["matrix"](r_mat, nrow=arr.shape[0], ncol=arr.shape[1],
-                           dimnames=ro.r["list"](ro.NULL, ro.StrVector(col_names)))
+                          dimnames=ro.r["list"](ro.NULL, ro.StrVector(col_names)))
 
 
 def _to_r_vec(arr):
@@ -167,75 +92,189 @@ def _to_r_vec(arr):
         return ro.conversion.py2rpy(np.ascontiguousarray(arr, dtype=np.float64))
 
 
-# ---- Gene record --------------------------------------------------------
+# ---- stage "nb_fixed": pure-Python unpenalized mean-only NB (fixed dispersion) ----
+
+def _nb_irls(y, X, alpha, max_iter=100, tol=1e-8):
+    """Unpenalized NB2(alpha fixed) mean-model IRLS. Returns (beta, converged)."""
+    n, p = X.shape
+    beta = np.zeros(p)
+    beta[0] = np.log(max(y.mean(), 1e-3))
+    for _ in range(max_iter):
+        eta = X @ beta
+        if np.max(np.abs(eta)) > 30:
+            # exp(30) ~ 1e13 is already unphysical for a mean-count model; the clip
+            # below would silently mask this as a converged fit instead of a
+            # diverging one, so treat it as IRLS divergence explicitly.
+            return beta, False
+        mu = np.clip(np.exp(eta), 1e-6, 1e8)
+        w = mu / (1.0 + alpha * mu)
+        z = eta + (y - mu) / np.clip(mu, 1e-6, None)
+        WX = X * w[:, None]
+        XtWX = X.T @ WX
+        XtWz = X.T @ (w * z)
+        try:
+            beta_new = np.linalg.solve(XtWX, XtWz)
+        except np.linalg.LinAlgError:
+            return beta, False
+        if not np.all(np.isfinite(beta_new)):
+            return beta, False
+        if np.max(np.abs(beta_new - beta)) < tol:
+            beta = beta_new
+            return beta, True
+        beta = beta_new
+    return beta, True
+
+
+def _nb_deviance(y, mu, alpha):
+    mu = np.clip(mu, 1e-8, None)
+    y_safe = np.where(y > 0, y, 1e-8)
+    term = y * np.log(y_safe / mu) - (y + 1.0 / alpha) * np.log((1 + alpha * y) / (1 + alpha * mu))
+    return float(2 * term.sum())
+
+
+def fit_intercept_only_gene(y_train, alpha_fn):
+    """Closed-form intercept-only NB: mu = mean(y_train), dispersion fixed from
+    the covariate-free trend. No optimization, no covariates -- succeeds for any
+    y with a finite, positive mean. Used both (a) as the intercept side of Route
+    B's full-vs-intercept GAIC comparison, and (b) as the final fallback when
+    Route B's full IRLS itself fails to converge -- one implementation, no
+    duplicated closed-form math. Returns dict(success, beta, alpha, fail_reason)."""
+    mean_y = float(y_train.mean()) if np.all(np.isfinite(y_train)) else np.nan
+    if not np.isfinite(mean_y) or mean_y <= 0:
+        return dict(success=False, fail_reason="intercept_only_undefined_mean", n_removed=0)
+    alpha_g = alpha_fn(mean_y)
+    if not np.isfinite(alpha_g) or alpha_g <= 0:
+        return dict(success=False, fail_reason="intercept_only_invalid_alpha", n_removed=0)
+    beta = np.array([np.log(mean_y)])
+    return dict(success=True, beta=beta, alpha=alpha_g, n_removed=0, fail_reason="")
+
+
+def _select_outliers(z, outlier_z, max_remove_frac, n_total, n_removed_so_far):
+    """Indices of the worst |z| points to drop this iteration, capped at the
+    remaining removal budget over ALL iterations combined (mirrors
+    gamlss.r's .select_outliers). Taking the worst points up to the cap --
+    instead of refusing to remove anything once the raw outlier count exceeds
+    max_remove_frac -- means the loop always makes progress toward the budget."""
+    outlier = np.isfinite(z) & (np.abs(z) > outlier_z)
+    budget = int(max_remove_frac * n_total) - n_removed_so_far
+    if not outlier.any() or budget <= 0:
+        return np.array([], dtype=int)
+    idx = np.where(outlier)[0]
+    if len(idx) > budget:
+        idx = idx[np.argsort(-np.abs(z[idx]))][:budget]
+    return idx
+
+
+def fit_route_b_gene(y_train, X_train, alpha_fn, outlier_z, max_iter, max_remove_frac,
+                     beta_explode_thr=None, gaic_k=None):
+    """Unpenalized mean-only NB (fixed dispersion from the trend), GAIC full-vs-intercept."""
+    beta_explode_thr = MP2["beta_explode_thr"] if beta_explode_thr is None else beta_explode_thr
+    gaic_k = MP2["gaic_k"] if gaic_k is None else gaic_k
+    n = len(y_train)
+    Xa = np.column_stack([np.ones(n), X_train])
+    keep = np.ones(n, dtype=bool)
+    n_removed = 0
+    beta = None
+    alpha_g = alpha_fn(float(y_train.mean()))
+
+    for _ in range(max_iter):
+        y_k, X_k = y_train[keep], Xa[keep]
+        alpha_g = alpha_fn(float(y_k.mean()))
+        beta, ok = _nb_irls(y_k, X_k, alpha_g)
+        if not ok or not np.all(np.isfinite(beta)):
+            return dict(success=False, fail_reason="irls_diverged", n_removed=n_removed)
+        mu_k = np.clip(np.exp(X_k @ beta), 1e-6, 1e8)
+        z_k = _nb_rqr(y_k, mu_k, alpha_g, seed=0)
+        drop_idx = _select_outliers(z_k, outlier_z, max_remove_frac, n, n_removed)
+        if len(drop_idx) == 0:
+            break
+        idx_keep = np.where(keep)[0]
+        keep[idx_keep[drop_idx]] = False
+        n_removed += len(drop_idx)
+
+    if beta is None or not np.all(np.isfinite(beta)):
+        return dict(success=False, fail_reason="fit_failed", n_removed=n_removed)
+
+    y_k, X_k = y_train[keep], Xa[keep]
+    mu_full = np.clip(np.exp(X_k @ beta), 1e-6, 1e8)
+    dev_full = _nb_deviance(y_k, mu_full, alpha_g)
+    edf_full = X_k.shape[1]
+    gaic_full = dev_full + gaic_k * edf_full
+
+    null_res = fit_intercept_only_gene(y_k, alpha_fn)
+    if not null_res["success"]:
+        # The full IRLS already succeeded, so a usable fit exists regardless;
+        # the closed-form intercept model failing here would only happen for a
+        # pathological y_k (should not occur once the full fit converged), so
+        # just skip the comparison and keep the full fit.
+        return dict(success=True, beta=beta, beta_null=beta, alpha=alpha_g,
+                   gaic_full=gaic_full, gaic_null=np.inf, chosen="full",
+                   beta_max=float(np.abs(beta[1:]).max()), n_removed=n_removed, fail_reason="")
+
+    beta_null = np.concatenate([null_res["beta"], np.zeros(Xa.shape[1] - 1)])
+    mu_null = np.full(len(y_k), np.exp(null_res["beta"][0])).clip(1e-6, 1e8)
+    dev_null = _nb_deviance(y_k, mu_null, null_res["alpha"])
+    gaic_null = dev_null + gaic_k * 1
+
+    beta_max = float(np.abs(beta[1:]).max())
+    if not np.isfinite(gaic_full) or beta_max > beta_explode_thr:
+        chosen = "intercept"
+    else:
+        chosen = "full" if gaic_full < gaic_null else "intercept"
+
+    chosen_alpha = null_res["alpha"] if chosen == "intercept" else alpha_g
+    return dict(success=True, beta=beta, beta_null=beta_null, alpha=chosen_alpha,
+               gaic_full=gaic_full, gaic_null=gaic_null, chosen=chosen,
+               beta_max=beta_max, n_removed=n_removed, fail_reason="")
+
+
+# ---- Gene record ----------------------------------------------------------
 
 @dataclass
-class GeneRecord:
+class GeneRecordV2:
     name: str
-    branch: str       # "logistic" | "nbi" | "zinbi" | "rare"
-    det_rate: float
+    initial_route: str      # "pool" | "model"  (Phase 1 gating)
+    route: str = ""          # final route actually used: "pool" | "model" | "excluded"
+    stage: str = ""          # which model stage produced the fit: "nbi" | "nb_fixed" | "intercept"
+    nz: int = 0
+    attempted: bool = False  # True once train() has processed this gene (vs. skipped by --limit)
 
-    logistic_model: LogisticRegression = None
+    # stage == "nbi" (full NBI GAMLSS, mu and sigma on covariates)
     mu_coef: np.ndarray = None
     sigma_coef: np.ndarray = None
-    nu_coef: np.ndarray = None   # ZINBI only
+    nbi_explode: str = ""    # "" | "mu" | "sigma" | "mu+sigma"  (which submodel triggered demotion)
 
-    mean_hc: float = None        # rare only (pooled-GLM offset baseline)
-    category: str = None         # rare only ("silent" | "near_silent")
+    # stage in {"nb_fixed", "intercept"} (mean-only NB, dispersion fixed from the trend)
+    beta: np.ndarray = None
+    alpha: float = None
+    mean_model_chosen: str = ""  # "full" | "intercept"  (GAIC choice within stage == "nb_fixed")
+
+    # route == "pool" (rare pooling)
+    mean_hc: float = None
 
     fit_ok: bool = False
     n_removed: int = 0
     fail_reason: str = ""
+    w1_train: float = None  # in-sample W1 calibration of the accepted fit (all stages except pool)
 
 
-# ---- Engine -------------------------------------------------------------
+# ---- Engine ---------------------------------------------------------------
 
-class NormativeModelEngine:
-    """
-    Parameters
-    ----------
-    count_model : {"nbi", "zinbi"}
-        GAMLSS family for high-detectability genes.
-    zinbi_nu_formula : {"intercept", "full"}
-        nu sub-model formula when count_model="zinbi".
-        "intercept" regularizes nu as a global constant.
-    low_det_thr : float
-        Genes below this detection rate go to the logistic branch.
-    nbi_outlier_z, nbi_max_iter, nbi_max_remove_frac
-        Iterative outlier-removal settings for the count model.
-    """
-
-    def __init__(
-        self,
-        count_model="nbi",
-        zinbi_nu_formula="intercept",
-        low_det_thr=LOW_DET_THR,
-        det_rate_min=DET_RATE_MIN,
-        rare_det_max=RARE_DET_MAX,
-        rare_overdisp_thr=RARE_OVERDISP_THR,
-        rare_z_cap=RARE_Z_CAP,
-        mean_count_min=MEAN_COUNT_MIN,
-        lr_C=LR_C,
-        nbi_outlier_z=5.0,
-        nbi_max_iter=2,
-        nbi_max_remove_frac=0.10,
-        lambda_sigma=0.05,
-    ):
-        if count_model not in ("nbi", "zinbi"):
-            raise ValueError("count_model must be 'nbi' or 'zinbi'")
-        self.count_model = count_model
-        self.zinbi_nu_formula = zinbi_nu_formula
-        self.low_det_thr = low_det_thr
-        self.det_rate_min = det_rate_min
-        self.rare_det_max = rare_det_max
-        self.rare_overdisp_thr = rare_overdisp_thr
-        self.rare_z_cap = rare_z_cap
-        self.mean_count_min = mean_count_min
-        self.lr_C = lr_C
-        self.nbi_outlier_z = nbi_outlier_z
-        self.nbi_max_iter = nbi_max_iter
-        self.nbi_max_remove_frac = nbi_max_remove_frac
-        self.lambda_sigma = lambda_sigma
+class NormativeModelEngineV2:
+    def __init__(self, nz_a_max=None, trend_min_nz=None,
+                ridge_lambda_sigma=None, outlier_z=None, max_outlier_iter=None,
+                max_remove_frac=None, beta_explode_thr=None, gaic_k=None,
+                rare_overdisp_thr=None, rare_z_cap=None):
+        self.nz_a_max = nz_a_max or MP2["nz_a_max"]
+        self.trend_min_nz = trend_min_nz or MP2["trend_min_nz"]
+        self.ridge_lambda_sigma = ridge_lambda_sigma or MP2["ridge_lambda_sigma"]
+        self.gaic_k = gaic_k or MP2["gaic_k"]
+        self.outlier_z = outlier_z or MP2["outlier_z"]
+        self.max_outlier_iter = max_outlier_iter or MP2["max_outlier_iter"]
+        self.max_remove_frac = max_remove_frac or MP2["max_remove_frac"]
+        self.beta_explode_thr = beta_explode_thr or MP2["beta_explode_thr"]
+        self.rare_overdisp_thr = rare_overdisp_thr or MP2["rare_overdisp_thr"]
+        self.rare_z_cap = rare_z_cap or MP2["rare_z_cap"]
 
         self.X_hc_scaled = None
         self.Y_hc = None
@@ -243,29 +282,24 @@ class NormativeModelEngine:
         self.is_hc = None
         self.pc_gene_names = []
         self.pc_indices = None
+        self._gene_col = {}
 
         self.genes = {}
-        self.logistic_genes = []
-        self.count_genes = []
-        self.rare_genes = []
+        self.alpha_fn = None
         self.rare_glm = None
 
         self._r_nbi_fn = None
-        self._r_zinbi_fn = None
+        self._r_nbi_null_fn = None
 
-    # ---- Data loading ---------------------------------------------------
+    # ---- Data loading -----------------------------------------------------
 
-    def load_hc_data(self, h5ad_path=config.H5AD_PATH, exclude_authors=None):
+    def load_hc_data(self, h5ad_path=config.H5AD_PATH):
         print("Loading HC data...")
         adata = sc.read_h5ad(h5ad_path)
         adata = adata[adata.obs["QC_Passed"] == True]
         adata = adata[adata.obs["Phenotype_Processed"].notna()]
         adata = adata[adata.obs["Phenotype_Processed"] != "Unknown"]
-        adata = adata[adata.obs["broad_protocol_category"] != "Exome-based (EB)"]  # WTS only
-        if exclude_authors is not None:
-            if isinstance(exclude_authors, str):
-                exclude_authors = [exclude_authors]
-            adata = adata[~adata.obs["Author"].isin(exclude_authors)]
+        adata = adata[adata.obs["broad_protocol_category"] != "Exome-based (EB)"]
         self.is_hc = (adata.obs["Phenotype_Processed"].astype(str) == "Healthy Control").values
 
         X_raw = adata.obs[config.BIAS_COLUMNS].values.astype(np.float64)
@@ -278,141 +312,180 @@ class NormativeModelEngine:
         is_pc = (adata.var["GeneType"] == "protein_coding").values
         self.pc_gene_names = adata.var_names[is_pc].tolist()
         self.pc_indices = np.where(is_pc)[0]
+        self._gene_col = {g: self.pc_indices[i] for i, g in enumerate(self.pc_gene_names)}
         print(f"  HC={self.is_hc.sum()}  protein-coding={len(self.pc_gene_names)}")
 
-    # ---- Branch assignment ---------------------------------------------
+    # ---- Phase 0: dispersion trend -----------------------------------------
 
-    def assign_branches(self):
+    def build_dispersion_trend(self):
+        Y_pc = self.Y_hc[:, self.pc_indices]
+        trend = build_trend(Y_pc, min_nz=self.trend_min_nz)
+        save_trend(trend)
+        self.alpha_fn = load_trend()
+        print(f"Dispersion trend built: n_reliable={trend['n_reliable']} "
+              f"n_bins={trend['n_bins_used']}")
+
+    # ---- Phase 1: gating ----------------------------------------------------
+
+    def assign_routes(self):
+        """Only NZ-based decision in the whole pipeline: nz < nz_a_max goes to
+        rare pooling directly; everything else attempts the nbi stage first and
+        lets the nbi -> nb_fixed -> intercept demotion chain decide the rest from
+        actual fit outcomes, not a fixed NZ cutoff."""
         assert self.Y_hc is not None, "Call load_hc_data() first."
         Y_pc = self.Y_hc[:, self.pc_indices]
-        det_r = (Y_pc > 0).mean(axis=0)
-        mean_c = Y_pc.mean(axis=0)
+        nz = (Y_pc > 0).sum(axis=0)
         self.genes = {}
-
         for i, g in enumerate(self.pc_gene_names):
-            dr, mc = float(det_r[i]), float(mean_c[i])
-            if dr < self.rare_det_max:
-                rec = GeneRecord(name=g, branch="rare", det_rate=dr, mean_hc=mc,
-                                 category="silent" if dr == 0 else "near_silent")
-                self.genes[g] = rec
-                continue
-            if dr < self.low_det_thr:
-                branch = "logistic"   # 1% <= det < 10%
-            else:
-                branch = self.count_model  # det >= 10% -> NBI
-            self.genes[g] = GeneRecord(name=g, branch=branch, det_rate=dr)
+            n = int(nz[i])
+            route = "pool" if n < self.nz_a_max else "model"
+            self.genes[g] = GeneRecordV2(name=g, initial_route=route, nz=n)
+        counts = pd.Series([r.initial_route for r in self.genes.values()]).value_counts()
+        print(f"Phase 1 gating: pool={counts.get('pool',0)}  "
+              f"model-candidates(nbi-first)={counts.get('model',0)}  (nz_a_max={self.nz_a_max})")
+        return counts
 
-        self.logistic_genes = [g for g, r in self.genes.items() if r.branch == "logistic"]
-        self.count_genes = [g for g, r in self.genes.items()
-                            if r.branch not in ("logistic", "rare")]
-        self.rare_genes = [g for g, r in self.genes.items() if r.branch == "rare"]
-        print(f"Branches: rare={len(self.rare_genes)}"
-              f"  logistic={len(self.logistic_genes)}"
-              f"  {self.count_model}={len(self.count_genes)}"
-              f"  (rare<{self.rare_det_max:.0%}, logistic<{self.low_det_thr:.0%})")
-        return {"rare": self.rare_genes, "logistic": self.logistic_genes,
-                self.count_model: self.count_genes}
-
-    def add_rare_branch(self):
-        """Add rare GeneRecords to an already-loaded engine without disturbing existing
-        per-gene (logistic/nbi) records. For the --rare-only attach path."""
-        assert self.Y_hc is not None, "Call load_hc_data() first."
-        Y_pc = self.Y_hc[:, self.pc_indices]
-        det_r = (Y_pc > 0).mean(axis=0)
-        mean_c = Y_pc.mean(axis=0)
-        for i, g in enumerate(self.pc_gene_names):
-            dr = float(det_r[i])
-            if dr < self.rare_det_max and g not in self.genes:
-                self.genes[g] = GeneRecord(name=g, branch="rare", det_rate=dr,
-                                           mean_hc=float(mean_c[i]),
-                                           category="silent" if dr == 0 else "near_silent")
-        self.rare_genes = [g for g, r in self.genes.items() if r.branch == "rare"]
-        print(f"Rare branch: {len(self.rare_genes)} genes added")
-        return self.rare_genes
-
-    # ---- R init --------------------------------------------------------
+    # ---- R init -------------------------------------------------------------
 
     def _init_r(self):
         if self._r_nbi_fn is None:
             ro.r(f'source("{config.R_HELPER}")')
             self._r_nbi_fn = ro.globalenv["train_nbi_coeffs"]
-            self._r_zinbi_fn = ro.globalenv["train_zinbi_coeffs"]
-
-    # ---- Per-gene training ---------------------------------------------
 
     def _gene_y(self, g):
-        idx = self.pc_gene_names.index(g)
-        return self.Y_hc[:, self.pc_indices[idx]]
+        return self.Y_hc[:, self._gene_col[g]]
 
-    def _train_logistic(self, rec):
-        y_bin = (self._gene_y(rec.name) > 0).astype(int)
-        if y_bin.sum() == 0 or y_bin.sum() == len(y_bin):
-            rec.fail_reason = "no_variation"
-            return
-        lr = LogisticRegression(penalty="l2", C=self.lr_C, solver="lbfgs",
-                                 max_iter=LR_MAX_ITER, random_state=42)
-        lr.fit(self.X_hc_scaled, y_bin)
-        rec.logistic_model = lr
+    def _record_calibration(self, rec, z_train):
+        """In-sample W1, recorded for diagnostics/flagging only -- does not gate
+        route/stage acceptance. A hard demotion/exclusion threshold on z-score
+        normality turned out to be theoretically awkward here (RQR's own
+        optimism bias at low NZ, n_valid varying gene-to-gene under CV, and
+        statistical significance vs. practical effect size all pulling in
+        different directions), so this is left as a training_summary.csv column
+        for downstream review rather than an accept/reject gate."""
+        rec.w1_train = _w1_normal(z_train)
+
+    # ---- stage "nbi": full NBI GAMLSS (mu AND sigma on covariates) -----------
+
+    def _fit_nbi(self, rec):
+        """Try full NBI only -- no intercept-only competitor is fit here. Any
+        failure (R non-convergence, rpy2-level exception, or coefficient
+        explosion in mu or sigma) demotes straight to stage "nb_fixed", which
+        does its own full-vs-intercept GAIC comparison using the shared
+        fit_intercept_only_gene closed form. In-sample W1 is recorded
+        (w1_train) but does not itself gate acceptance -- see
+        _record_calibration."""
+        self._init_r()
+        y = self._gene_y(rec.name)
+        try:
+            res_full = self._r_nbi_fn(
+                _to_r_vec(y), _to_r_matrix(self.X_hc_scaled, config.BIAS_COLUMNS),
+                ro.IntVector([50]), ro.FloatVector([self.outlier_z]),
+                ro.IntVector([self.max_outlier_iter]), ro.FloatVector([self.max_remove_frac]),
+                ro.FloatVector([self.ridge_lambda_sigma]),
+            )
+        except Exception as exc:
+            rec.fail_reason = f"nbi_full_error:{exc}"
+            return False
+
+        if not bool(res_full.rx2("success")[0]):
+            rec.fail_reason = str(res_full.rx2("msg")[0]) or "nbi_full_not_converged"
+            return False
+
+        beta_full = np.array(res_full.rx2("mu_coef"))
+        sigma_full = np.array(res_full.rx2("sigma_coef"))
+        mu_explode = float(np.abs(beta_full[1:]).max()) > self.beta_explode_thr
+        sigma_explode = float(np.abs(sigma_full[1:]).max()) > self.beta_explode_thr
+        if mu_explode or sigma_explode:
+            rec.nbi_explode = "+".join(t for t, e in [("mu", mu_explode), ("sigma", sigma_explode)] if e)
+            rec.fail_reason = f"beta_explode:{rec.nbi_explode}"
+            return False
+
+        z_train = _nbi_rqr_from_coeffs(beta_full, sigma_full, self.X_hc_scaled, y, seed=0)
+        self._record_calibration(rec, z_train)
+
+        rec.mu_coef = beta_full
+        rec.sigma_coef = sigma_full
+        rec.n_removed = int(res_full.rx2("n_removed")[0])
+        rec.route = "model"
+        rec.stage = "nbi"
         rec.fit_ok = True
+        return True
 
-    def _train_nbi(self, rec):
-        self._init_r()
-        res = self._r_nbi_fn(
-            _to_r_vec(self._gene_y(rec.name)),
-            _to_r_matrix(self.X_hc_scaled, config.BIAS_COLUMNS),
-            ro.IntVector([50]),
-            ro.FloatVector([self.nbi_outlier_z]),
-            ro.IntVector([self.nbi_max_iter]),
-            ro.FloatVector([self.nbi_max_remove_frac]),
-            ro.FloatVector([self.lambda_sigma]),
-        )
-        if res.rx2("success")[0]:
-            rec.mu_coef = np.array(res.rx2("mu_coef"))
-            rec.sigma_coef = np.array(res.rx2("sigma_coef"))
-            rec.n_removed = int(res.rx2("n_removed")[0])
-            rec.fit_ok = True
+    # ---- stage "nb_fixed": unpenalized mean-only NB ---------------------------
+
+    def _fit_nb_fixed(self, rec):
+        """False (IRLS divergence) demotes to the final intercept-only stage."""
+        y = self._gene_y(rec.name)
+        res = fit_route_b_gene(y, self.X_hc_scaled, self.alpha_fn,
+                               self.outlier_z, self.max_outlier_iter, self.max_remove_frac,
+                               beta_explode_thr=self.beta_explode_thr, gaic_k=self.gaic_k)
+        if not res["success"]:
+            rec.fail_reason = res["fail_reason"]
+            return False
+
+        Xa = np.column_stack([np.ones(len(y)), self.X_hc_scaled])
+        if res["chosen"] == "full":
+            mu = np.clip(np.exp(Xa @ res["beta"]), 1e-6, 1e8)
         else:
-            rec.fail_reason = str(res.rx2("msg")[0])
+            mu = np.full(len(y), np.exp(res["beta_null"][0])).clip(1e-6, 1e8)
+        z_train = _nb_rqr(y, mu, res["alpha"], seed=0)
+        self._record_calibration(rec, z_train)
 
-    def _train_zinbi(self, rec):
-        self._init_r()
-        res = self._r_zinbi_fn(
-            _to_r_vec(self._gene_y(rec.name)),
-            _to_r_matrix(self.X_hc_scaled, config.BIAS_COLUMNS),
-            ro.IntVector([50]),
-            ro.FloatVector([self.nbi_outlier_z]),
-            ro.IntVector([self.nbi_max_iter]),
-            ro.FloatVector([self.nbi_max_remove_frac]),
-            ro.StrVector([self.zinbi_nu_formula]),
-            ro.FloatVector([self.lambda_sigma]),
-        )
-        if res.rx2("success")[0]:
-            rec.mu_coef = np.array(res.rx2("mu_coef"))
-            rec.sigma_coef = np.array(res.rx2("sigma_coef"))
-            rec.nu_coef = np.array(res.rx2("nu_coef"))
-            rec.n_removed = int(res.rx2("n_removed")[0])
-            rec.fit_ok = True
-        else:
-            rec.fail_reason = str(res.rx2("msg")[0])
+        rec.beta = res["beta"] if res["chosen"] == "full" else res["beta_null"]
+        rec.alpha = res["alpha"]
+        rec.mean_model_chosen = res["chosen"]
+        rec.n_removed = res["n_removed"]
+        rec.route = "model"
+        rec.stage = "nb_fixed"
+        rec.fit_ok = True
+        return True
 
-    def train_rare(self):
-        """Fit one pooled covariate GLM shared across all rare genes.
+    # ---- stage "intercept": closed-form intercept-only NB --------------------
 
-        log(mu_ij) = log(mean_hc_j + eps) [offset] + beta^T x_i [shared].
-        Poisson first; escalate to Negative Binomial only if pooled deviance/df exceeds
-        the lenient rare_overdisp_thr. Stores self.rare_glm and marks rare records fit_ok.
-        """
-        rare_recs = [self.genes[g] for g in self.rare_genes]
-        if not rare_recs:
+    def _fit_intercept(self, rec):
+        """Last step of the demotion chain, reached only when stage "nb_fixed"'s
+        full IRLS itself diverges. fit_intercept_only_gene is a closed-form
+        computation (mu=mean(y), dispersion from the trend) that succeeds for
+        any y with a finite positive mean -- i.e. essentially always. The rare
+        pathological failure (non-finite y or invalid trend lookup) is excluded
+        entirely rather than silently defaulted elsewhere, per policy."""
+        y = self._gene_y(rec.name)
+        res = fit_intercept_only_gene(y, self.alpha_fn)
+        if not res["success"]:
+            rec.fail_reason = res["fail_reason"]
+            return False
+
+        mu = np.full(len(y), np.exp(res["beta"][0])).clip(1e-6, 1e8)
+        z_train = _nb_rqr(y, mu, res["alpha"], seed=0)
+        self._record_calibration(rec, z_train)
+
+        rec.beta = res["beta"]
+        rec.alpha = res["alpha"]
+        rec.mean_model_chosen = "intercept"
+        rec.n_removed = res["n_removed"]
+        rec.route = "model"
+        rec.stage = "intercept"
+        rec.fit_ok = True
+        return True
+
+    # ---- route "pool" (rare pooling, pooled GLM, always succeeds) ------------
+
+    def train_rare(self, gene_list):
+        if not gene_list:
             return
         n_hc = self.X_hc_scaled.shape[0]
         eps = 1.0 / (2 * n_hc)
-        cols = [self.pc_indices[self.pc_gene_names.index(r.name)] for r in rare_recs]
+        cols = [self._gene_col[g] for g in gene_list]
         Y_rare = self.Y_hc[:, cols]
         mean_hc = Y_rare.mean(axis=0)
-        for r, m in zip(rare_recs, mean_hc):
-            r.mean_hc = float(m)
-        n_rare = len(rare_recs)
+        for g, m in zip(gene_list, mean_hc):
+            self.genes[g].mean_hc = float(m)
+            self.genes[g].route = "pool"
+            self.genes[g].fit_ok = True
+            self.genes[g].attempted = True
+
+        n_rare = len(gene_list)
         sample_idx = np.repeat(np.arange(n_hc), n_rare)
         gene_idx = np.tile(np.arange(n_rare), n_hc)
         Xc = np.column_stack([np.ones(n_hc * n_rare), self.X_hc_scaled[sample_idx]])
@@ -427,10 +500,81 @@ class NormativeModelEngine:
             family, beta, alpha = "negbin", np.asarray(nb.params[:-1]), float(nb.params[-1])
         self.rare_glm = {"family": family, "beta": beta, "alpha": alpha,
                          "eps": eps, "overdisp_ratio": ratio}
-        for r in rare_recs:
-            r.fit_ok = True
-        print(f"Rare branch: {n_rare} genes pooled, family={family}, "
+        print(f"Route pool (rare pooling): {n_rare} genes pooled, family={family}, "
               f"deviance/df={ratio:.3f}")
+
+    # ---- Bulk training with demotion chain -----------------------------------
+
+    def train(self, verbose=True, limit=None):
+        """nbi -> nb_fixed -> intercept, one gene at a time, each step attempted
+        only after the previous one actually failed. Pool candidates (NZ <
+        nz_a_max) never enter this chain -- they go straight to pooled rare
+        fitting."""
+        assert self.genes, "Call assign_routes() first."
+        if self.alpha_fn is None:
+            self.build_dispersion_trend()
+
+        all_genes = list(self.genes.keys())[:limit]
+        model_candidates = [g for g in all_genes if self.genes[g].initial_route == "model"]
+        pool_candidates = [g for g in all_genes if self.genes[g].initial_route == "pool"]
+        print(f"Training: model-candidates(nbi-first)={len(model_candidates)}  "
+              f"pool-candidates(rare)={len(pool_candidates)}")
+
+        demoted_to_nb_fixed = []
+        for i, g in enumerate(model_candidates):
+            rec = self.genes[g]
+            rec.attempted = True
+            try:
+                ok = self._fit_nbi(rec)
+            except Exception as exc:
+                ok = False
+                rec.fail_reason = str(exc)
+            if not ok:
+                demoted_to_nb_fixed.append(g)
+            if verbose and (i + 1) % 500 == 0:
+                print(f"  [stage nbi {i+1:5d}/{len(model_candidates)}] "
+                      f"demoted_so_far={len(demoted_to_nb_fixed)}")
+        print(f"Step 1 (stage nbi): {len(model_candidates)-len(demoted_to_nb_fixed)} fitted, "
+              f"{len(demoted_to_nb_fixed)} demoted to stage nb_fixed")
+
+        demoted_to_intercept = []
+        for i, g in enumerate(demoted_to_nb_fixed):
+            rec = self.genes[g]
+            try:
+                ok = self._fit_nb_fixed(rec)
+            except Exception as exc:
+                ok = False
+                rec.fail_reason = str(exc)
+            if not ok:
+                demoted_to_intercept.append(g)
+            if verbose and (i + 1) % 500 == 0:
+                print(f"  [stage nb_fixed {i+1:5d}/{len(demoted_to_nb_fixed)}] "
+                      f"demoted_so_far={len(demoted_to_intercept)}")
+        print(f"Step 2 (stage nb_fixed): {len(demoted_to_nb_fixed)-len(demoted_to_intercept)} fitted, "
+              f"{len(demoted_to_intercept)} demoted to stage intercept")
+
+        excluded = []
+        for i, g in enumerate(demoted_to_intercept):
+            rec = self.genes[g]
+            try:
+                ok = self._fit_intercept(rec)
+            except Exception as exc:
+                ok = False
+                rec.fail_reason = str(exc)
+            if not ok:
+                excluded.append(g)
+                rec.route = "excluded"
+        print(f"Step 3 (stage intercept): "
+              f"{len(demoted_to_intercept)-len(excluded)} fitted, {len(excluded)} EXCLUDED")
+
+        self.train_rare(pool_candidates)
+
+        n_fitted = sum(1 for r in self.genes.values() if r.fit_ok)
+        n_excluded = sum(1 for r in self.genes.values() if r.route == "excluded")
+        print(f"Training complete: {n_fitted} fitted, {n_excluded} excluded, "
+              f"total={len(self.genes)}")
+
+    # ---- Scoring --------------------------------------------------------------
 
     def _rare_z(self, rec, X_test, y_col, seed):
         g = self.rare_glm
@@ -443,56 +587,7 @@ class NormativeModelEngine:
             z = _nb_rqr(y_col, mu, g["alpha"], seed)
         return np.clip(z, -self.rare_z_cap, self.rare_z_cap).astype(np.float32)
 
-    # ---- Bulk training -------------------------------------------------
-
-    def train(self, verbose=True, limit=None):
-        assert self.genes, "Call assign_branches() first."
-        per_gene = [g for g in list(self.genes.keys())[:limit]
-                    if self.genes[g].branch != "rare"]
-        n_log = sum(1 for g in per_gene if self.genes[g].branch == "logistic")
-        print(f"Training {len(per_gene)} per-gene  "
-              f"(logistic={n_log}, {self.count_model}={len(per_gene)-n_log})  "
-              f"+ rare pooled={len(self.rare_genes)}")
-
-        for i, g in enumerate(per_gene):
-            rec = self.genes[g]
-            try:
-                if   rec.branch == "logistic": self._train_logistic(rec)
-                elif rec.branch == "zinbi":    self._train_zinbi(rec)
-                else:                          self._train_nbi(rec)
-            except Exception as exc:
-                rec.fail_reason = str(exc)
-                if verbose:
-                    print(f"  [ERR] {g} ({rec.branch}): {exc}")
-            if verbose and (i + 1) % 500 == 0:
-                ok = sum(1 for g2 in per_gene if self.genes[g2].fit_ok)
-                print(f"  [{i+1:5d}/{len(per_gene)}] fitted={ok}")
-
-        self.train_rare()
-        ok = sum(1 for g in self.genes if self.genes[g].fit_ok)
-        print(f"Training complete: {ok}/{len(self.genes)} succeeded.")
-
-    # ---- Scoring -------------------------------------------------------
-
     def score(self, X_test_raw, Y_test, gene_names=None, seed=42):
-        """Score new samples. Returns dict with separate logistic/count matrices.
-
-        Parameters
-        ----------
-        X_test_raw : (n_test, 10)   raw bias-metric covariates (unscaled)
-        Y_test     : (n_test, n_genes)  raw count matrix
-        gene_names : column order in Y_test (default: all fitted genes)
-
-        Returns
-        -------
-        dict:
-          "logistic"             : (n_test, n_logistic)  low-det matrix [SEPARATE]
-          "count"                : (n_test, n_count)     high-det matrix
-          "combined"             : (n_test, n_all)       logistic | count
-          "logistic_gene_names"  : list
-          "count_gene_names"     : list
-          "gene_names"           : list (= combined order)
-        """
         gene_names = gene_names or [g for g in self.genes if self.genes[g].fit_ok]
         X_test = self.scaler.transform(X_test_raw.astype(np.float64))
         n_test, n_gene = len(X_test), len(gene_names)
@@ -500,218 +595,56 @@ class NormativeModelEngine:
             raise ValueError(f"Y_test has {Y_test.shape[1]} columns, expected {n_gene}")
 
         Z = np.full((n_test, n_gene), np.nan, dtype=np.float32)
+        Xa = np.column_stack([np.ones(n_test), X_test])
         for j, g in enumerate(gene_names):
             rec = self.genes.get(g)
             if rec is None or not rec.fit_ok:
                 continue
             y_col = Y_test[:, j].astype(np.float64)
             try:
-                if rec.branch == "logistic":
-                    p = rec.logistic_model.predict_proba(X_test)[:, 1]
-                    Z[:, j] = _bernoulli_rqr(p, y_col, seed + j)
-                elif rec.branch == "rare":
+                if rec.route == "pool":
                     Z[:, j] = self._rare_z(rec, X_test, y_col, seed + j)
-                elif rec.branch == "zinbi":
-                    Z[:, j] = _zinbi_rqr_from_coeffs(
-                        rec.mu_coef, rec.sigma_coef, rec.nu_coef,
-                        X_test, y_col, seed + j)
-                else:
-                    Z[:, j] = _nbi_rqr_from_coeffs(
-                        rec.mu_coef, rec.sigma_coef, X_test, y_col, seed + j)
+                elif rec.stage == "nbi":
+                    Z[:, j] = _nbi_rqr_from_coeffs(rec.mu_coef, rec.sigma_coef, X_test, y_col, seed + j)
+                elif rec.stage in ("nb_fixed", "intercept"):
+                    if rec.mean_model_chosen == "full":
+                        mu = np.clip(np.exp(Xa @ rec.beta), 1e-6, 1e8)
+                    else:
+                        mu = np.full(n_test, np.exp(rec.beta[0])).clip(1e-6, 1e8)
+                    Z[:, j] = _nb_rqr(y_col, mu, rec.alpha, seed + j)
             except Exception:
                 pass
+        return Z
 
-        log_idx = [j for j, g in enumerate(gene_names)
-                   if self.genes.get(g) and self.genes[g].branch == "logistic"]
-        cnt_idx = [j for j, g in enumerate(gene_names)
-                   if self.genes.get(g) and self.genes[g].branch not in ("logistic", "rare")]
-        rare_idx = [j for j, g in enumerate(gene_names)
-                    if self.genes.get(g) and self.genes[g].branch == "rare"]
+    # ---- Diagnostics & persistence --------------------------------------------
 
-        # canonical "combined" stays engine-only (logistic | count); rare columns are
-        # zeroed to preserve the historical Z_disease.npy placeholder contract. Callers
-        # wanting rare use the separate "rare" matrix or "combined_all".
-        combined = Z.copy()
-        if rare_idx:
-            combined[:, rare_idx] = 0.0
-
-        return {
-            "logistic": Z[:, log_idx] if log_idx else np.zeros((n_test, 0), np.float32),
-            "count": Z[:, cnt_idx] if cnt_idx else np.zeros((n_test, 0), np.float32),
-            "rare": Z[:, rare_idx] if rare_idx else np.zeros((n_test, 0), np.float32),
-            "combined": combined,
-            "combined_all": Z,
-            "gene_names": gene_names,
-            "logistic_gene_names": [gene_names[j] for j in log_idx],
-            "count_gene_names": [gene_names[j] for j in cnt_idx],
-            "rare_gene_names": [gene_names[j] for j in rare_idx],
-        }
-
-    def to_dataframe(self, result, sample_ids=None, which="combined"):
-        Z = result[which]
-        col_key = "gene_names" if which == "combined" else f"{which}_gene_names"
-        gene_names = result[col_key]
-        sample_ids = sample_ids or [f"s{i}" for i in range(Z.shape[0])]
-        return pd.DataFrame(Z, index=sample_ids, columns=gene_names)
-
-    # ---- Warm-start refit ---------------------------------------------
-
-    def _compute_warm_start(self, rec, X_scaled):
-        """Return (mu_start, sigma_start) as fitted-value vectors for X_scaled."""
-        n = len(X_scaled)
-        Xa = np.column_stack([np.ones(n), X_scaled])
-        mu_s = np.exp(Xa @ rec.mu_coef).clip(1e-4, 1e6)
-        sigma_s = np.exp(Xa @ rec.sigma_coef).clip(1e-8, 1e3)
-        return mu_s, sigma_s
-
-    def refit(
-        self,
-        X_new_raw,
-        Y_new,
-        gene_names=None,
-        strategy="new_only",
-        X_old_raw=None,
-        Y_old=None,
-        verbose=True,
-        limit=None,
-    ):
-        """Warm-start refit: use existing coefficient vectors as starting values.
-
-        Parameters
-        ----------
-        X_new_raw : (n_new, n_cov)  raw (unscaled) covariate matrix, new data
-        Y_new     : (n_new, n_genes) raw count matrix, new data
-        gene_names: column order in Y_new (defaults to all NBI fitted genes)
-        strategy  :
-          "new_only"  - refit on new data alone, warm-started from old coefficients.
-                        Fastest; useful when new data is large enough to stand alone.
-          "combined"  - concatenate old + new data before refitting.
-                        Requires X_old_raw/Y_old OR self.X_hc_scaled/self.Y_hc
-                        to still be in memory (call load_hc_data() first).
-        X_old_raw, Y_old : explicitly supply old data for "combined" strategy.
-        """
-        import time
-        assert self.genes, "Load engine first (engine.load())."
-        assert self.scaler is not None, "Scaler missing — load engine first."
-
-        gene_names = gene_names or [g for g in self.genes
-                                    if self.genes[g].fit_ok
-                                    and self.genes[g].branch != "logistic"]
-        if limit is not None:
-            gene_names = gene_names[:limit]
-
-        X_new = self.scaler.transform(X_new_raw.astype(np.float64))
-
-        # ── Resolve training data ────────────────────────────────────
-        if strategy == "combined":
-            X_old = (self.scaler.transform(X_old_raw.astype(np.float64))
-                     if X_old_raw is not None else self.X_hc_scaled)
-            y_old_mat = Y_old if Y_old is not None else self.Y_hc
-            if X_old is None or y_old_mat is None:
-                raise ValueError(
-                    "'combined' strategy requires old data. "
-                    "Pass X_old_raw/Y_old or call load_hc_data() first."
-                )
-            X_train = np.vstack([X_old, X_new])
-            Y_train_mat = np.vstack([y_old_mat, Y_new])
-        else:
-            X_train = X_new
-            Y_train_mat = Y_new
-
-        g2col = {g: j for j, g in enumerate(gene_names)}
-
-        self._init_r()
-        r_warm_fn = ro.globalenv["train_nbi_coeffs_warm"]
-
-        n_refitted = n_skipped = n_failed = 0
-        t_start = time.perf_counter()
-
-        for g in gene_names:
-            rec = self.genes.get(g)
-            if rec is None or not rec.fit_ok or rec.branch == "logistic":
-                n_skipped += 1
-                continue
-            col = g2col[g]
-            y_tr = Y_train_mat[:, col].astype(np.float64)
-
-            # Warm starting values on the (combined) training set
-            mu_s, sigma_s = self._compute_warm_start(rec, X_train)
-
-            try:
-                res = r_warm_fn(
-                    _to_r_vec(y_tr),
-                    _to_r_matrix(X_train, config.BIAS_COLUMNS),
-                    _to_r_vec(mu_s),
-                    _to_r_vec(sigma_s),
-                    ro.IntVector([50]),
-                    ro.FloatVector([self.nbi_outlier_z]),
-                    ro.IntVector([self.nbi_max_iter]),
-                    ro.FloatVector([self.nbi_max_remove_frac]),
-                    ro.FloatVector([self.lambda_sigma]),
-                )
-                if res.rx2("success")[0]:
-                    rec.mu_coef = np.array(res.rx2("mu_coef"))
-                    rec.sigma_coef = np.array(res.rx2("sigma_coef"))
-                    rec.n_removed = int(res.rx2("n_removed")[0])
-                    n_refitted += 1
-                else:
-                    rec.fail_reason = str(res.rx2("msg")[0])
-                    n_failed += 1
-            except Exception as exc:
-                rec.fail_reason = str(exc)
-                n_failed += 1
-                if verbose:
-                    print(f"  [ERR] {g}: {exc}")
-
-            if verbose and (n_refitted + n_failed) % 500 == 0:
-                print(f"  [{n_refitted+n_failed:5d}/{len(gene_names)}] "
-                      f"ok={n_refitted} fail={n_failed}")
-
-        print(f"Refit ({strategy}): {n_refitted} ok, "
-              f"{n_failed} failed, {n_skipped} skipped — "
-              f"{time.perf_counter()-t_start:.1f}s")
-
-    # ---- Diagnostics & persistence ------------------------------------
-
-    def branch_summary(self):
-        rows = [{"gene": r.name, "branch": r.branch,
-                 "det_rate": round(r.det_rate, 4),
-                 "fit_ok": r.fit_ok, "n_removed": r.n_removed,
-                 "fail_reason": r.fail_reason}
-                for r in self.genes.values()]
-        df = pd.DataFrame(rows).set_index("gene")
-        agg = df.groupby("branch")[["fit_ok", "n_removed"]].agg(
-            n_genes=("fit_ok", "count"), n_fitted=("fit_ok", "sum"),
-            total_removed=("n_removed", "sum"))
-        print(agg)
-        return df
+    def training_summary(self, attempted_only=True):
+        """attempted_only=True (default) reports only genes train() actually processed
+        -- relevant when train(limit=N) was used for a smoke test, since the remaining
+        genes were gated (initial_route set) but never attempted."""
+        recs = [r for r in self.genes.values() if r.attempted] if attempted_only else self.genes.values()
+        rows = [{"gene": r.name, "initial_route": r.initial_route, "route": r.route,
+                 "stage": r.stage, "nz": r.nz, "fit_ok": r.fit_ok, "attempted": r.attempted,
+                 "nbi_explode": r.nbi_explode, "mean_model_chosen": r.mean_model_chosen,
+                 "n_removed": r.n_removed, "w1_train": r.w1_train, "fail_reason": r.fail_reason}
+                for r in recs]
+        return pd.DataFrame(rows).set_index("gene")
 
     def save(self, directory):
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
-
         with open(directory / "genes.pkl", "wb") as f: pickle.dump(self.genes, f)
         with open(directory / "scaler.pkl", "wb") as f: pickle.dump(self.scaler, f)
         if self.rare_glm is not None:
             with open(directory / "rare_glm.pkl", "wb") as f: pickle.dump(self.rare_glm, f)
-
         _SKIP = {"genes", "scaler", "X_hc_scaled", "Y_hc", "is_hc", "rare_glm",
-                 "pc_gene_names", "pc_indices", "logistic_genes", "count_genes", "rare_genes"}
+                 "pc_gene_names", "pc_indices", "alpha_fn"}
         cfg = {k: v for k, v in vars(self).items()
                if not k.startswith("_") and k not in _SKIP}
         with open(directory / "config.pkl", "wb") as f: pickle.dump(cfg, f)
-
-        df = self.branch_summary()
+        df = self.training_summary(attempted_only=False)
         df.to_csv(directory / "training_summary.csv")
-
-        df_fail = df[~df["fit_ok"]].copy()
-        df_fail.to_csv(directory / "training_failures.csv")
-
         print(f"Engine saved to {directory}/")
-        if len(df_fail):
-            print(f"  Failures: {len(df_fail)} -> training_failures.csv")
-            for branch, cnt in df_fail.groupby("branch").size().items():
-                print(f"    {branch}: {cnt}")
 
     @classmethod
     def load(cls, directory):
@@ -724,10 +657,7 @@ class NormativeModelEngine:
         rare_glm_path = directory / "rare_glm.pkl"
         if rare_glm_path.exists():
             with open(rare_glm_path, "rb") as f: engine.rare_glm = pickle.load(f)
-        engine.logistic_genes = [g for g, r in engine.genes.items() if r.branch == "logistic"]
-        engine.count_genes = [g for g, r in engine.genes.items()
-                              if r.branch not in ("logistic", "rare")]
-        engine.rare_genes = [g for g, r in engine.genes.items() if r.branch == "rare"]
+        engine.alpha_fn = load_trend()
         n_ok = sum(1 for r in engine.genes.values() if r.fit_ok)
         print(f"Engine loaded from {directory}/  ({n_ok} fitted genes)")
         return engine
