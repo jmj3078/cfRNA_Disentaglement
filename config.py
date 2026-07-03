@@ -101,5 +101,4 @@ MODELING_PARAMS = {
     "beta_explode_thr":  3.0,    # |slope coef| threshold flagging non-identifiable mean fit
     "gaic_k":            2.0,    # GAIC penalty weight (k=2 == AIC convention, gamlss default)
     "rare_overdisp_thr": 2.0,
-    "rare_z_cap":        10.0,
 }

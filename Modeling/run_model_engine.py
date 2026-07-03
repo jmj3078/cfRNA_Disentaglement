@@ -5,6 +5,7 @@ demotion-chain statistics: nbi -> nb_fixed (GAIC full-vs-intercept) -> intercept
 
   python run_model_engine.py                # full run
   python run_model_engine.py --limit 200     # smoke test
+  python run_model_engine.py --rare-only     # re-fit only the pooled rare GLM (no R/NBI)
 """
 
 import argparse
@@ -26,9 +27,22 @@ SAVE_DIR = config.ENGINE_DIR
 parser = argparse.ArgumentParser()
 parser.add_argument("--limit", type=int, default=None, help="limit to first N genes (smoke test)")
 parser.add_argument("--nz-a-max", type=int, default=None)
+parser.add_argument("--rare-only", action="store_true",
+                    help="reload the trained engine and re-fit only the pooled rare GLM "
+                         "(pure Python, no R/NBI); e.g. to refresh the covariate-mult clip bounds")
 args = parser.parse_args()
 
 t0 = time.perf_counter()
+
+if args.rare_only:
+    engine = NormativeModelEngine.load(SAVE_DIR)
+    engine.load_hc_data()
+    pool_genes = [g for g, r in engine.genes.items() if r.route == "pool"]
+    print(f"--rare-only: re-fitting pooled rare GLM on {len(pool_genes)} genes")
+    engine.train_rare(pool_genes)
+    engine.save(SAVE_DIR)
+    print(f"\nrare GLM re-fit done in {time.perf_counter() - t0:.1f}s -> {SAVE_DIR}")
+    sys.exit(0)
 
 engine = NormativeModelEngine(nz_a_max=args.nz_a_max)
 engine.load_hc_data()

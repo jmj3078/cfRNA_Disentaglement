@@ -28,6 +28,10 @@ from dispersion_trend import build_trend, load_trend, save_trend
 
 MP = config.MODELING_PARAMS
 
+# Shared RQR probability-clip epsilon. Applied identically across all stage RQRs so the
+# z-score ceiling is consistent: norm.ppf(1 - RQR_EPS) ~= 5.61 for every stage (previously
+RQR_EPS = 1e-8
+
 
 # ---- Pure-Python RQR helpers (mirrors model_engine.py) ------------------
 
@@ -35,7 +39,7 @@ def _poisson_rqr(y, mu, seed=None):
     y = np.asarray(y)
     lo = np.where(y > 0, poisson.cdf(y - 1, mu), 0.0)
     hi = poisson.cdf(y, mu)
-    lo = np.clip(lo, 1e-12, 1 - 1e-12); hi = np.clip(hi, 1e-12, 1 - 1e-12)
+    lo = np.clip(lo, RQR_EPS, 1 - RQR_EPS); hi = np.clip(hi, RQR_EPS, 1 - RQR_EPS)
     rng = np.random.default_rng(seed)
     return norm.ppf(rng.uniform(np.minimum(lo, hi), np.maximum(lo, hi))).astype(np.float32)
 
@@ -43,10 +47,10 @@ def _poisson_rqr(y, mu, seed=None):
 def _nb_rqr(y, mu, alpha, seed=None):
     y = np.asarray(y)
     n = 1.0 / alpha
-    p = np.clip(n / (n + mu), 1e-12, 1 - 1e-12)
+    p = np.clip(n / (n + mu), RQR_EPS, 1 - RQR_EPS)
     lo = np.where(y > 0, nbinom.cdf(y - 1, n, p), 0.0)
     hi = nbinom.cdf(y, n, p)
-    lo = np.clip(lo, 1e-12, 1 - 1e-12); hi = np.clip(hi, 1e-12, 1 - 1e-12)
+    lo = np.clip(lo, RQR_EPS, 1 - RQR_EPS); hi = np.clip(hi, RQR_EPS, 1 - RQR_EPS)
     rng = np.random.default_rng(seed)
     return norm.ppf(rng.uniform(np.minimum(lo, hi), np.maximum(lo, hi))).astype(np.float32)
 
@@ -68,12 +72,12 @@ def _nbi_rqr_from_coeffs(mu_coef, sigma_coef, X_test, y_test, seed=None):
     mu = np.exp(Xa @ mu_coef).clip(1e-4, 1e6)
     sigma = np.exp(Xa @ sigma_coef).clip(1e-8, 1e3)
     theta = (1.0 / sigma).clip(1e-4, 1e4)
-    p_nb = np.clip(theta / (theta + mu), 1e-8, 1 - 1e-8)
+    p_nb = np.clip(theta / (theta + mu), RQR_EPS, 1 - RQR_EPS)
     yi = np.asarray(y_test, dtype=int)
     a = np.where(yi > 0, nbinom.cdf(yi - 1, n=theta, p=p_nb), 0.0)
     b = nbinom.cdf(yi, n=theta, p=p_nb)
-    lo = np.clip(np.minimum(a, b), 1e-8, 1 - 1e-8)
-    hi = np.clip(np.maximum(a, b), 1e-8, 1 - 1e-8)
+    lo = np.clip(np.minimum(a, b), RQR_EPS, 1 - RQR_EPS)
+    hi = np.clip(np.maximum(a, b), RQR_EPS, 1 - RQR_EPS)
     rng = np.random.default_rng(seed)
     return norm.ppf(rng.uniform(lo, hi)).astype(np.float32)
 
@@ -273,7 +277,7 @@ class NormativeModelEngine:
     def __init__(self, nz_a_max=None, trend_min_nz=None,
                 ridge_lambda_sigma=None, outlier_z=None, max_outlier_iter=None,
                 max_remove_frac=None, beta_explode_thr=None, gaic_k=None,
-                rare_overdisp_thr=None, rare_z_cap=None):
+                rare_overdisp_thr=None):
         self.nz_a_max = nz_a_max or MP["nz_a_max"]
         self.trend_min_nz = trend_min_nz or MP["trend_min_nz"]
         self.ridge_lambda_sigma = ridge_lambda_sigma or MP["ridge_lambda_sigma"]
@@ -283,7 +287,6 @@ class NormativeModelEngine:
         self.max_remove_frac = max_remove_frac or MP["max_remove_frac"]
         self.beta_explode_thr = beta_explode_thr or MP["beta_explode_thr"]
         self.rare_overdisp_thr = rare_overdisp_thr or MP["rare_overdisp_thr"]
-        self.rare_z_cap = rare_z_cap or MP["rare_z_cap"]
 
         self.X_hc_scaled = None
         self.Y_hc = None
@@ -507,10 +510,19 @@ class NormativeModelEngine:
         else:
             nb = NegativeBinomial(y, Xc, offset=offset).fit(disp=False)
             family, beta, alpha = "negbin", np.asarray(nb.params[:-1]), float(nb.params[-1])
+        # Covariate-multiplier clip bounds, from the range actually seen in HC training
+        # (per-sample exp(covariate @ slopes), intercept excluded). Scoring clips new
+        # samples' multiplier to this range so a few-covariate-extreme (OOD-adjacent)
+        # sample cannot extrapolate mu to an implausible value and manufacture a
+        # false extreme z. [0.1, 99.9] pct, not min/max, to ignore lone HC outliers.
+        hc_mult = np.exp(self.X_hc_scaled @ beta[1:])
+        mult_lo = float(np.percentile(hc_mult, 0.1))
+        mult_hi = float(np.percentile(hc_mult, 99.9))
         self.rare_glm = {"family": family, "beta": beta, "alpha": alpha,
-                         "eps": eps, "overdisp_ratio": ratio}
+                         "eps": eps, "overdisp_ratio": ratio,
+                         "mult_lo": mult_lo, "mult_hi": mult_hi}
         print(f"Route pool (rare pooling): {n_rare} genes pooled, family={family}, "
-              f"deviance/df={ratio:.3f}")
+              f"deviance/df={ratio:.3f}, covariate-mult clip=[{mult_lo:.3f}, {mult_hi:.3f}]")
 
     # ---- Bulk training with demotion chain -----------------------------------
 
@@ -587,14 +599,19 @@ class NormativeModelEngine:
 
     def _rare_z(self, rec, X_test, y_col, seed):
         g = self.rare_glm
-        Xc = np.column_stack([np.ones(len(X_test)), X_test])
-        mu = (rec.mean_hc + g["eps"]) * np.exp(Xc @ g["beta"])
+        X_test = np.asarray(X_test)
+        # split intercept from covariate slopes so the covariate multiplier can be clipped
+        # to the HC-observed range (guards against OOD-adjacent samples extrapolating mu).
+        mult = np.exp(X_test @ g["beta"][1:])
+        if "mult_lo" in g:
+            mult = np.clip(mult, g["mult_lo"], g["mult_hi"])
+        mu = (rec.mean_hc + g["eps"]) * np.exp(g["beta"][0]) * mult
         mu = np.clip(mu, 1e-12, 1e8)
         if g["family"] == "poisson":
             z = _poisson_rqr(y_col, mu, seed)
         else:
             z = _nb_rqr(y_col, mu, g["alpha"], seed)
-        return np.clip(z, -self.rare_z_cap, self.rare_z_cap).astype(np.float32)
+        return z.astype(np.float32)
 
     def score(self, X_test_raw, Y_test, gene_names=None, seed=42, as_dict=False):
         """Score new samples. Returns the raw Z matrix by default (used by CV).

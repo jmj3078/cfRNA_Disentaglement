@@ -372,21 +372,36 @@ def plot_selection_overview(method_name, all_results, Z_dis, dis_pheno, dis_name
 
 
 # ── disease_scoring per-sample Manhattan (disease_scoring) ──────────────────
-_SCORE_BRANCH_COLOR = {'count': '#E41A1C', 'rare': '#984EA3'}
+# Fine-grained stage/route colouring. The flagged table's score_type
+# (nbi_z / nb_fixed_z / intercept_z / rare_glm) maps to the engine stage/route.
+_SCORE_STAGE_COLOR = STAGE_COLOR
+_SCORE_STAGE_LABEL = {'nbi': 'full NBI', 'nb_fixed': 'fixed-disp NB',
+                      'intercept': 'intercept NB', 'pool': 'pooled GLM (rare)'}
+_SCORE_TYPE_TO_STAGE = {'nbi_z': 'nbi', 'nb_fixed_z': 'nb_fixed',
+                        'intercept_z': 'intercept', 'rare_glm': 'pool'}
+
+
+def _stage_of(df):
+    """Map the flagged table's score_type to the engine stage/route."""
+    return df['score_type'].map(_SCORE_TYPE_TO_STAGE).fillna('nbi')
 
 
 def plot_sample(df, sample_id, phenotype='', top_n=20, z_flag=None):
     z_flag = MP['z_flag'] if z_flag is None else z_flag
     df = df.dropna(subset=['score']).copy()
     df['abs_score'] = df['score'].abs()
+    df['stage'] = _stage_of(df)
     df_sorted = df.sort_values('score', ascending=False).reset_index(drop=True)
     flagged = df[df['abs_score'] >= z_flag].sort_values('abs_score', ascending=False)
     fig, axes = plt.subplots(1, 2, figsize=(18, 5), gridspec_kw={'width_ratios': [3, 1]})
 
     ax = axes[0]
-    for branch, sub in df_sorted.groupby('branch'):
-        ax.scatter(sub.index, sub['score'], s=0.2, alpha=0.25,
-                   color=_SCORE_BRANCH_COLOR.get(branch, 'grey'), label=branch, rasterized=True)
+    for stage in ['nbi', 'nb_fixed', 'intercept', 'pool']:
+        sub = df_sorted[df_sorted['stage'] == stage]
+        if len(sub) == 0:
+            continue
+        ax.scatter(sub.index, sub['score'], s=0.2, alpha=0.25, color=_SCORE_STAGE_COLOR[stage],
+                   label=f'{_SCORE_STAGE_LABEL[stage]} (n={len(sub):,})', rasterized=True)
     flag_sub = df_sorted[df_sorted['abs_score'] >= z_flag]
     ax.scatter(flag_sub.index, flag_sub['score'], s=5, color='black', zorder=5, alpha=0.8)
     for _, row in flag_sub.head(5).iterrows():
@@ -398,7 +413,7 @@ def plot_sample(df, sample_id, phenotype='', top_n=20, z_flag=None):
     ax.set_xlabel('Genes (sorted by score)')
     ax.set_ylabel('Anomaly Score (z / rare_score)')
     ax.set_title(f'{sample_id}\n{phenotype}', fontweight='bold')
-    ax.legend(fontsize=8, loc='upper right')
+    ax.legend(fontsize=8, loc='upper right', markerscale=8)
 
     ax2 = axes[1]
     top = flagged.head(top_n)
@@ -407,7 +422,7 @@ def plot_sample(df, sample_id, phenotype='', top_n=20, z_flag=None):
                  transform=ax2.transAxes, color='grey')
         ax2.axis('off')
     else:
-        colors = [_SCORE_BRANCH_COLOR.get(b, 'grey') for b in top['branch']]
+        colors = [_SCORE_STAGE_COLOR.get(s, 'grey') for s in top['stage']]
         ax2.barh(range(len(top)), top['abs_score'].values, color=colors, alpha=0.8, edgecolor='white')
         ax2.set_yticks(range(len(top)))
         ax2.set_yticklabels([f"{g}  ({c:.0f}ct)" for g, c in
@@ -416,9 +431,72 @@ def plot_sample(df, sample_id, phenotype='', top_n=20, z_flag=None):
         ax2.axvline(z_flag, color='red', lw=1, ls='--', alpha=0.6)
         ax2.set_xlabel('|Score|')
         ax2.set_title(f'Top {len(top)} Flagged Genes', fontweight='bold')
-        legend_els = [Patch(facecolor=c, label=b) for b, c in _SCORE_BRANCH_COLOR.items()]
+        seen = [s for s in ['nbi', 'nb_fixed', 'intercept', 'pool'] if s in set(top['stage'])]
+        legend_els = [Patch(facecolor=_SCORE_STAGE_COLOR[s], label=_SCORE_STAGE_LABEL[s]) for s in seen]
         ax2.legend(handles=legend_els, fontsize=7, loc='lower right')
     plt.tight_layout()
+    return fig
+
+
+def plot_stage_score_diagnostics(flagged, z_flag=None, fig_dir=None, save=True):
+    """Check whether any stage over-values z (extreme |z| driven by tiny counts, or an
+    inconsistent per-stage z ceiling). Reads the flagged parquet (all disease samples).
+
+    3 panels: (1) per-stage |z| distribution + max-|z| ceiling annotation (RQR epsilon clip
+    differs by stage: nbi ~5.6, others ~7.0); (2) |z| vs raw_count hexbin per stage to spot
+    high-z-from-low-count overvaluation; (3) fraction of |z|>=6 flags coming from raw_count
+    <= 3 per stage (overvaluation index)."""
+    z_flag = MP['z_flag'] if z_flag is None else z_flag
+    fig_dir = fig_dir or config.CV_FIG_DIR
+    df = flagged.dropna(subset=['score']).copy()
+    df['stage'] = _stage_of(df)
+    df['absz'] = df['score'].abs()
+    present = [s for s in STAGE_ORDER if s in set(df['stage'])]
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+    ax = axes[0]
+    for s in present:
+        a = df.loc[df['stage'] == s, 'absz']
+        ax.hist(a, bins=np.linspace(z_flag, a.max() + 0.2, 40), histtype='step', lw=1.6,
+                color=_SCORE_STAGE_COLOR[s], density=True,
+                label=f'{_SCORE_STAGE_LABEL[s]} (max |z|={a.max():.2f})')
+    ax.set_xlabel('|z| (flagged genes only)')
+    ax.set_ylabel('density')
+    ax.set_title('Per-stage |z| distribution + ceiling', fontweight='bold')
+    ax.legend(fontsize=8, loc='upper right')
+
+    ax = axes[1]
+    for s in present:
+        sub = df[df['stage'] == s]
+        ax.scatter(sub['raw_count'].clip(lower=0.5), sub['absz'], s=3, alpha=0.15,
+                   color=_SCORE_STAGE_COLOR[s], label=_SCORE_STAGE_LABEL[s], rasterized=True)
+    ax.set_xscale('log')
+    ax.axhline(6, color='black', lw=1, ls='--', alpha=0.6)
+    ax.set_xlabel('raw count (observed, log)')
+    ax.set_ylabel('|z|')
+    ax.set_title('|z| vs raw count (low-count high-z = overvaluation)', fontweight='bold')
+    ax.legend(fontsize=8, loc='lower right', markerscale=4)
+
+    ax = axes[2]
+    idx = []
+    for s in present:
+        hi = df[(df['stage'] == s) & (df['absz'] >= 6)]
+        frac = (hi['raw_count'] <= 3).mean() * 100 if len(hi) else 0.0
+        idx.append((s, frac, len(hi)))
+    ax.bar(range(len(idx)), [f for _, f, _ in idx],
+           color=[_SCORE_STAGE_COLOR[s] for s, _, _ in idx], alpha=0.85)
+    ax.set_xticks(range(len(idx)))
+    ax.set_xticklabels([f'{_SCORE_STAGE_LABEL[s]}\n(n={n:,})' for s, _, n in idx], fontsize=8)
+    ax.set_ylabel('% of |z|>=6 flags with raw_count <= 3')
+    ax.set_title('Overvaluation index (extreme flags from tiny counts)', fontweight='bold')
+    for i, (_, f, _) in enumerate(idx):
+        ax.annotate(f'{f:.1f}%', (i, f), ha='center', va='bottom', fontsize=9)
+
+    plt.tight_layout()
+    if save:
+        fig_dir.mkdir(parents=True, exist_ok=True)
+        fig.savefig(fig_dir / 'stage_score_diagnostics.png', bbox_inches='tight', dpi=150)
     return fig
 
 
