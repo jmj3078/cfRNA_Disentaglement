@@ -55,6 +55,21 @@ rqr_nbi <- function(y, mu, sigma, seed = NULL) {
   qnorm(u)
 }
 
+# ── Outlier selection for the iterative removal loop ───────────────
+# Returns indices (into z) of the worst |z| points to drop this iteration,
+# capped at the remaining removal budget over ALL iterations combined. Taking
+# the worst points up to the cap (instead of refusing to remove anything once
+# the raw outlier count exceeds max_remove_frac) means the loop always makes
+# progress toward the budget rather than giving up entirely.
+.select_outliers <- function(z, outlier_z, max_remove_frac, n_total, n_removed_so_far) {
+  outlier <- is.finite(z) & (abs(z) > outlier_z)
+  budget <- floor(max_remove_frac * n_total) - n_removed_so_far
+  if (!any(outlier) || budget <= 0) return(integer(0))
+  idx <- which(outlier)
+  if (length(idx) > budget) idx <- idx[order(-abs(z[idx]))][seq_len(budget)]
+  idx
+}
+
 # ── Internal: fit NBI on a data frame and return the gamlss object ──
 .fit_nbi <- function(df_tr, mu_fml, sigma_fml, n_cyc, ridge_vec = NULL) {
   ctrl <- if (is.null(ridge_vec))
@@ -128,14 +143,12 @@ fit_gamlss_gene <- function(y_train, y_test, X_train, X_test,
     z_tr    <- rqr_nbi(df_tr$y__[keep],
                         mu    = as.numeric(pred_tr$mu),
                         sigma = as.numeric(pred_tr$sigma))
-    outlier <- is.finite(z_tr) & (abs(z_tr) > outlier_z)
-
-    if (!any(outlier)) break
-    if (sum(outlier) / n_tr_orig > max_remove_frac) break
+    drop_idx <- .select_outliers(z_tr, outlier_z, max_remove_frac, n_tr_orig, n_removed)
+    if (length(drop_idx) == 0) break
 
     idx_keep  <- which(keep)
-    keep[idx_keep[outlier]] <- FALSE
-    n_removed <- n_removed + sum(outlier)
+    keep[idx_keep[drop_idx]] <- FALSE
+    n_removed <- n_removed + length(drop_idx)
   }
 
   pred_te <- tryCatch(
@@ -382,11 +395,10 @@ train_nbi_coeffs <- function(y_train, X_train,
     if (inherits(pred_tr, "error")) break
     z_tr    <- rqr_nbi(df_tr$y__[keep],
                         mu = as.numeric(pred_tr$mu), sigma = as.numeric(pred_tr$sigma))
-    outlier <- is.finite(z_tr) & (abs(z_tr) > outlier_z)
-    if (!any(outlier)) break
-    if (sum(outlier) / n_tr_orig > max_remove_frac) break
-    keep[which(keep)[outlier]] <- FALSE
-    n_removed <- n_removed + sum(outlier)
+    drop_idx <- .select_outliers(z_tr, outlier_z, max_remove_frac, n_tr_orig, n_removed)
+    if (length(drop_idx) == 0) break
+    keep[which(keep)[drop_idx]] <- FALSE
+    n_removed <- n_removed + length(drop_idx)
   }
 
   if (is.null(fit) || inherits(fit, "error")) return(na_result)

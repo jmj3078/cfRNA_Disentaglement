@@ -51,6 +51,17 @@ def _nb_rqr(y, mu, alpha, seed=None):
     return norm.ppf(rng.uniform(np.minimum(lo, hi), np.maximum(lo, hi))).astype(np.float32)
 
 
+def _w1_normal(z):
+    """Mean abs deviation between sorted z and theoretical N(0,1) quantiles.
+    Guideline (cv_gamlss_nb.py): > 0.25 indicates poor calibration."""
+    v = z[np.isfinite(z)]
+    n = len(v)
+    if n < 8:
+        return np.nan
+    ref = norm.ppf(np.linspace(1 / (2 * n), 1 - 1 / (2 * n), n))
+    return float(np.mean(np.abs(np.sort(v) - ref)))
+
+
 def _nbi_rqr_from_coeffs(mu_coef, sigma_coef, X_test, y_test, seed=None):
     n = len(y_test)
     Xa = np.column_stack([np.ones(n), X_test])
@@ -138,6 +149,22 @@ def fit_intercept_only_gene(y_train, alpha_fn):
     return dict(success=True, beta=beta, alpha=alpha_g, n_removed=0, fail_reason="")
 
 
+def _select_outliers(z, outlier_z, max_remove_frac, n_total, n_removed_so_far):
+    """Indices of the worst |z| points to drop this iteration, capped at the
+    remaining removal budget over ALL iterations combined (mirrors
+    gamlss.r's .select_outliers). Taking the worst points up to the cap --
+    instead of refusing to remove anything once the raw outlier count exceeds
+    max_remove_frac -- means the loop always makes progress toward the budget."""
+    outlier = np.isfinite(z) & (np.abs(z) > outlier_z)
+    budget = int(max_remove_frac * n_total) - n_removed_so_far
+    if not outlier.any() or budget <= 0:
+        return np.array([], dtype=int)
+    idx = np.where(outlier)[0]
+    if len(idx) > budget:
+        idx = idx[np.argsort(-np.abs(z[idx]))][:budget]
+    return idx
+
+
 def fit_route_b_gene(y_train, X_train, alpha_fn, outlier_z, max_iter, max_remove_frac,
                      beta_explode_thr=None, gaic_k=None):
     """Unpenalized mean-only NB (fixed dispersion from the trend), GAIC full-vs-intercept."""
@@ -158,14 +185,12 @@ def fit_route_b_gene(y_train, X_train, alpha_fn, outlier_z, max_iter, max_remove
             return dict(success=False, fail_reason="irls_diverged", n_removed=n_removed)
         mu_k = np.clip(np.exp(X_k @ beta), 1e-6, 1e8)
         z_k = _nb_rqr(y_k, mu_k, alpha_g, seed=0)
-        outlier = np.isfinite(z_k) & (np.abs(z_k) > outlier_z)
-        if not outlier.any():
-            break
-        if outlier.sum() / n > max_remove_frac:
+        drop_idx = _select_outliers(z_k, outlier_z, max_remove_frac, n, n_removed)
+        if len(drop_idx) == 0:
             break
         idx_keep = np.where(keep)[0]
-        keep[idx_keep[outlier]] = False
-        n_removed += int(outlier.sum())
+        keep[idx_keep[drop_idx]] = False
+        n_removed += len(drop_idx)
 
     if beta is None or not np.all(np.isfinite(beta)):
         return dict(success=False, fail_reason="fit_failed", n_removed=n_removed)
@@ -230,6 +255,7 @@ class GeneRecordV2:
     fit_ok: bool = False
     n_removed: int = 0
     fail_reason: str = ""
+    w1_train: float = None  # in-sample W1 calibration of the accepted fit (all stages except pool)
 
 
 # ---- Engine ---------------------------------------------------------------
@@ -329,6 +355,16 @@ class NormativeModelEngineV2:
     def _gene_y(self, g):
         return self.Y_hc[:, self._gene_col[g]]
 
+    def _record_calibration(self, rec, z_train):
+        """In-sample W1, recorded for diagnostics/flagging only -- does not gate
+        route/stage acceptance. A hard demotion/exclusion threshold on z-score
+        normality turned out to be theoretically awkward here (RQR's own
+        optimism bias at low NZ, n_valid varying gene-to-gene under CV, and
+        statistical significance vs. practical effect size all pulling in
+        different directions), so this is left as a training_summary.csv column
+        for downstream review rather than an accept/reject gate."""
+        rec.w1_train = _w1_normal(z_train)
+
     # ---- stage "nbi": full NBI GAMLSS (mu AND sigma on covariates) -----------
 
     def _fit_nbi(self, rec):
@@ -336,7 +372,9 @@ class NormativeModelEngineV2:
         failure (R non-convergence, rpy2-level exception, or coefficient
         explosion in mu or sigma) demotes straight to stage "nb_fixed", which
         does its own full-vs-intercept GAIC comparison using the shared
-        fit_intercept_only_gene closed form."""
+        fit_intercept_only_gene closed form. In-sample W1 is recorded
+        (w1_train) but does not itself gate acceptance -- see
+        _record_calibration."""
         self._init_r()
         y = self._gene_y(rec.name)
         try:
@@ -363,6 +401,9 @@ class NormativeModelEngineV2:
             rec.fail_reason = f"beta_explode:{rec.nbi_explode}"
             return False
 
+        z_train = _nbi_rqr_from_coeffs(beta_full, sigma_full, self.X_hc_scaled, y, seed=0)
+        self._record_calibration(rec, z_train)
+
         rec.mu_coef = beta_full
         rec.sigma_coef = sigma_full
         rec.n_removed = int(res_full.rx2("n_removed")[0])
@@ -374,7 +415,7 @@ class NormativeModelEngineV2:
     # ---- stage "nb_fixed": unpenalized mean-only NB ---------------------------
 
     def _fit_nb_fixed(self, rec):
-        """False demotes to the final intercept-only stage."""
+        """False (IRLS divergence) demotes to the final intercept-only stage."""
         y = self._gene_y(rec.name)
         res = fit_route_b_gene(y, self.X_hc_scaled, self.alpha_fn,
                                self.outlier_z, self.max_outlier_iter, self.max_remove_frac,
@@ -382,6 +423,15 @@ class NormativeModelEngineV2:
         if not res["success"]:
             rec.fail_reason = res["fail_reason"]
             return False
+
+        Xa = np.column_stack([np.ones(len(y)), self.X_hc_scaled])
+        if res["chosen"] == "full":
+            mu = np.clip(np.exp(Xa @ res["beta"]), 1e-6, 1e8)
+        else:
+            mu = np.full(len(y), np.exp(res["beta_null"][0])).clip(1e-6, 1e8)
+        z_train = _nb_rqr(y, mu, res["alpha"], seed=0)
+        self._record_calibration(rec, z_train)
+
         rec.beta = res["beta"] if res["chosen"] == "full" else res["beta_null"]
         rec.alpha = res["alpha"]
         rec.mean_model_chosen = res["chosen"]
@@ -405,6 +455,11 @@ class NormativeModelEngineV2:
         if not res["success"]:
             rec.fail_reason = res["fail_reason"]
             return False
+
+        mu = np.full(len(y), np.exp(res["beta"][0])).clip(1e-6, 1e8)
+        z_train = _nb_rqr(y, mu, res["alpha"], seed=0)
+        self._record_calibration(rec, z_train)
+
         rec.beta = res["beta"]
         rec.alpha = res["alpha"]
         rec.mean_model_chosen = "intercept"
@@ -571,7 +626,7 @@ class NormativeModelEngineV2:
         rows = [{"gene": r.name, "initial_route": r.initial_route, "route": r.route,
                  "stage": r.stage, "nz": r.nz, "fit_ok": r.fit_ok, "attempted": r.attempted,
                  "nbi_explode": r.nbi_explode, "mean_model_chosen": r.mean_model_chosen,
-                 "n_removed": r.n_removed, "fail_reason": r.fail_reason}
+                 "n_removed": r.n_removed, "w1_train": r.w1_train, "fail_reason": r.fail_reason}
                 for r in recs]
         return pd.DataFrame(rows).set_index("gene")
 

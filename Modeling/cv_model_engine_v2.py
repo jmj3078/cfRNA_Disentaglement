@@ -25,7 +25,7 @@ import pandas as pd
 import rpy2.robjects as ro
 import scanpy as sc
 from scipy.sparse import issparse
-from scipy.stats import kurtosis, norm, skew
+from scipy.stats import kurtosis, skew
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
@@ -33,7 +33,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config
 from model_engine_v2 import (_nb_rqr, _nbi_rqr_from_coeffs, _poisson_rqr,
-                             _to_r_matrix, _to_r_vec, fit_intercept_only_gene, fit_route_b_gene)
+                             _to_r_matrix, _to_r_vec, _w1_normal,
+                             fit_intercept_only_gene, fit_route_b_gene)
 from dispersion_trend import load_trend
 
 MP2 = config.MODELING_PARAMS_V2
@@ -58,85 +59,141 @@ def load_hc():
     return Xs, Y, var_names, strata
 
 
-def w1_normal(z):
-    v = z[np.isfinite(z)]
-    n = len(v)
-    if n < 8:
-        return np.nan
-    ref = norm.ppf(np.linspace(1 / (2 * n), 1 - 1 / (2 * n), n))
-    return float(np.mean(np.abs(np.sort(v) - ref)))
-
-
 def z_stats(z):
     v = z[np.isfinite(z)]
     n = len(v)
     if n < 2:
         return dict(w1=np.nan, mean_z=np.nan, std_z=np.nan, skew_z=np.nan, kurt_z=np.nan, n_valid=n)
-    return dict(w1=w1_normal(v), mean_z=float(v.mean()), std_z=float(v.std()),
+    return dict(w1=_w1_normal(v), mean_z=float(v.mean()), std_z=float(v.std()),
                skew_z=float(skew(v)), kurt_z=float(kurtosis(v)), n_valid=n)
+
+
+def fold_summary(fold_info, n_splits):
+    """Aggregates per-fold dicts (success/fail_reason/n_removed) into gene-level
+    columns. n_folds_ok distinguishes 'demoted to a worse-calibrated but still
+    fitted stage' from 'fold silently produced nothing' -- both look identical
+    in the pooled z_stats() (n_valid just drops), so without this a gene with
+    2/5 folds failing outright is indistinguishable from one with 5/5 folds
+    each contributing fewer usable held-out points."""
+    n_ok = sum(1 for f in fold_info if f["success"])
+    removed = [f["n_removed"] for f in fold_info if f["success"]]
+    reasons = sorted({f["fail_reason"] for f in fold_info if not f["success"] and f["fail_reason"]})
+    return dict(
+        n_folds=n_splits,
+        n_folds_ok=n_ok,
+        n_removed_total=int(sum(removed)) if removed else 0,
+        n_removed_mean=float(np.mean(removed)) if removed else 0.0,
+        fold_fail_reasons=";".join(reasons),
+    )
 
 
 def cv_pool(y, Xs, folds, mean_hc_full, rare_glm_full, seed):
     """Held-out z for a single route "pool" (rare-pooled) gene, refitting the
     shared pooled beta per fold is out of scope here -- reuse the full-data
     pooled GLM (consistent with 'route decided from full data' but scored on
-    held-out y)."""
+    held-out y). No per-fold fitting or outlier removal happens for pool, so
+    fold_info is trivially all-success/zero-removed for schema consistency
+    with the other three cv_* functions. Also returns per-held-out-point
+    mu/sigma so a posterior predictive check can simulate y ~ fitted(mu,sigma)
+    and compare to the actual held-out y, not just its z-score."""
     n = len(y)
     z = np.full(n, np.nan)
+    mu_all = np.full(n, np.nan)
+    sigma_all = np.full(n, np.nan)
     eps = rare_glm_full["eps"]
     for fi, (tr, te) in enumerate(folds):
         Xc = np.column_stack([np.ones(len(te)), Xs[te]])
         mu = np.clip((mean_hc_full + eps) * np.exp(Xc @ rare_glm_full["beta"]), 1e-12, 1e8)
+        mu_all[te] = mu
         if rare_glm_full["family"] == "poisson":
             z[te] = _poisson_rqr(y[te], mu, seed + fi)
+            sigma_all[te] = 0.0
         else:
             z[te] = _nb_rqr(y[te], mu, rare_glm_full["alpha"], seed + fi)
-    return z
+            sigma_all[te] = rare_glm_full["alpha"]
+    fold_info = [dict(fold=fi, success=True, fail_reason="", n_removed=0) for fi in range(len(folds))]
+    family = "poisson" if rare_glm_full["family"] == "poisson" else "nb"
+    return z, fold_info, mu_all, sigma_all, family
 
 
 def cv_nb_fixed(y, Xs, folds, alpha_fn, outlier_z, max_iter, max_remove_frac, seed,
                 beta_explode_thr=None, gaic_k=None):
     """Re-fits stage nb_fixed (full-vs-intercept GAIC comparison) per fold,
-    falling through to fit_intercept_only_gene if the full IRLS diverges."""
+    falling through to fit_intercept_only_gene if the full IRLS diverges.
+    Returns (z, fold_info, mu_all, sigma_all) -- fold_info is one dict per fold
+    for CV-level diagnostics (success, fail_reason, n_removed, chosen), since a
+    gene's aggregate calibration stats alone hide whether e.g. only 2/5 folds
+    actually produced a usable fit. mu_all/sigma_all hold the fitted mean/
+    dispersion at each held-out point (for posterior predictive checks),
+    including the fallback-intercept case."""
     n = len(y)
     z = np.full(n, np.nan)
+    mu_all = np.full(n, np.nan)
+    sigma_all = np.full(n, np.nan)
+    fold_info = []
     for fi, (tr, te) in enumerate(folds):
         res = fit_route_b_gene(y[tr], Xs[tr], alpha_fn, outlier_z, max_iter, max_remove_frac,
                                beta_explode_thr=beta_explode_thr, gaic_k=gaic_k)
         Xa_te = np.column_stack([np.ones(len(te)), Xs[te]])
+        info = dict(fold=fi, success=res["success"], fail_reason=res.get("fail_reason", ""),
+                    n_removed=res.get("n_removed", 0), chosen=res.get("chosen", ""))
         if res["success"]:
             if res["chosen"] == "full":
                 mu = np.clip(np.exp(Xa_te @ res["beta"]), 1e-6, 1e8)
             else:
                 mu = np.full(len(te), np.exp(res["beta_null"][0])).clip(1e-6, 1e8)
+            mu_all[te] = mu
+            sigma_all[te] = res["alpha"]
             z[te] = _nb_rqr(y[te], mu, res["alpha"], seed + fi)
         else:
             fb = fit_intercept_only_gene(y[tr], alpha_fn)
+            info["fallback_success"] = fb["success"]
             if fb["success"]:
                 mu = np.full(len(te), np.exp(fb["beta"][0])).clip(1e-6, 1e8)
+                mu_all[te] = mu
+                sigma_all[te] = fb["alpha"]
                 z[te] = _nb_rqr(y[te], mu, fb["alpha"], seed + fi)
-    return z
+        fold_info.append(info)
+    return z, fold_info, mu_all, sigma_all
 
 
 def cv_intercept(y, alpha_fn, folds, seed):
     """Re-evaluates genes whose final stage IS "intercept"
     (stage == 'intercept' in training_summary.csv): closed-form,
-    per fold, mirroring fit_intercept_only_gene exactly."""
+    per fold, mirroring fit_intercept_only_gene exactly. Returns (z, fold_info,
+    mu_all, sigma_all)."""
     n = len(y)
     z = np.full(n, np.nan)
+    mu_all = np.full(n, np.nan)
+    sigma_all = np.full(n, np.nan)
+    fold_info = []
     for fi, (tr, te) in enumerate(folds):
         res = fit_intercept_only_gene(y[tr], alpha_fn)
+        fold_info.append(dict(fold=fi, success=res["success"],
+                              fail_reason=res.get("fail_reason", ""), n_removed=0))
         if not res["success"]:
             continue
         mu = np.full(len(te), np.exp(res["beta"][0])).clip(1e-6, 1e8)
+        mu_all[te] = mu
+        sigma_all[te] = res["alpha"]
         z[te] = _nb_rqr(y[te], mu, res["alpha"], seed + fi)
-    return z
+    return z, fold_info, mu_all, sigma_all
 
 
 def cv_nbi(y, Xs, folds, r_fit_fn, col_names, outlier_z, max_iter, max_remove_frac,
           lambda_sigma, seed):
+    """Returns (z, fold_info). Each fold's R gamlss call reports success/msg/
+    n_removed even on failure (na_result in gamlss.r), so a bare except only
+    fires for genuinely unexpected rpy2/R-session errors -- those are recorded
+    with fail_reason='py_exception:<msg>' rather than silently dropped, so an
+    all-NaN gene (n_valid=0) is now traceable to a specific per-fold cause.
+    Also captures mu_test/sigma_test (already computed by fit_gamlss_gene but
+    previously discarded) for posterior predictive checks."""
     n = len(y)
     z = np.full(n, np.nan)
+    mu_all = np.full(n, np.nan)
+    sigma_all = np.full(n, np.nan)
+    fold_info = []
     for fi, (tr, te) in enumerate(folds):
         try:
             res = r_fit_fn(
@@ -146,11 +203,18 @@ def cv_nbi(y, Xs, folds, r_fit_fn, col_names, outlier_z, max_iter, max_remove_fr
                 ro.FloatVector([outlier_z]), ro.IntVector([max_iter]),
                 ro.FloatVector([max_remove_frac]), ro.FloatVector([lambda_sigma]),
             )
-            if res.rx2("success")[0]:
+            success = bool(res.rx2("success")[0])
+            fold_info.append(dict(fold=fi, success=success,
+                                  fail_reason="" if success else str(res.rx2("msg")[0])[:40],
+                                  n_removed=int(res.rx2("n_removed")[0])))
+            if success:
                 z[te] = np.array(res.rx2("z"))
-        except Exception:
-            pass
-    return z
+                mu_all[te] = np.array(res.rx2("mu_test"))
+                sigma_all[te] = np.array(res.rx2("sigma_test"))
+        except Exception as e:
+            fold_info.append(dict(fold=fi, success=False,
+                                  fail_reason=f"py_exception:{str(e)[:40]}", n_removed=0))
+    return z, fold_info, mu_all, sigma_all
 
 
 def main():
@@ -197,6 +261,7 @@ def main():
 
     rows = []
     zdict = {}
+    ppc_dict = {}
     route_counts = {}
     t0 = time.perf_counter()
     for i, (gene, row) in enumerate(summary.iterrows()):
@@ -206,25 +271,33 @@ def main():
         y = Y[:, j]
         route = row["route"]
         stage = row.get("stage", "")
+        family = "nb"
         if route == "pool":
-            z = cv_pool(y, Xs, folds, y.mean(), rare_glm_full, args.seed)
+            z, finfo, mu_all, sigma_all, family = cv_pool(y, Xs, folds, y.mean(), rare_glm_full, args.seed)
         elif route == "model" and stage == "intercept":
-            z = cv_intercept(y, alpha_fn, folds, args.seed)
+            z, finfo, mu_all, sigma_all = cv_intercept(y, alpha_fn, folds, args.seed)
         elif route == "model" and stage == "nb_fixed":
-            z = cv_nb_fixed(y, Xs, folds, alpha_fn, engine_cfg["outlier_z"],
-                            engine_cfg["max_outlier_iter"], engine_cfg["max_remove_frac"], args.seed,
-                            beta_explode_thr=engine_cfg["beta_explode_thr"], gaic_k=engine_cfg["gaic_k"])
+            z, finfo, mu_all, sigma_all = cv_nb_fixed(y, Xs, folds, alpha_fn, engine_cfg["outlier_z"],
+                                   engine_cfg["max_outlier_iter"], engine_cfg["max_remove_frac"], args.seed,
+                                   beta_explode_thr=engine_cfg["beta_explode_thr"], gaic_k=engine_cfg["gaic_k"])
         elif route == "model" and stage == "nbi":
-            z = cv_nbi(y, Xs, folds, r_fit_fn, config.BIAS_COLUMNS, engine_cfg["outlier_z"],
-                      engine_cfg["max_outlier_iter"], engine_cfg["max_remove_frac"],
-                      engine_cfg["ridge_lambda_sigma"], args.seed)
+            z, finfo, mu_all, sigma_all = cv_nbi(y, Xs, folds, r_fit_fn, config.BIAS_COLUMNS, engine_cfg["outlier_z"],
+                              engine_cfg["max_outlier_iter"], engine_cfg["max_remove_frac"],
+                              engine_cfg["ridge_lambda_sigma"], args.seed)
         else:
             continue
         zdict[gene] = z.astype(np.float32)
+        # y_hc stored alongside mu/sigma so a posterior predictive check (simulate
+        # y ~ fitted(mu, sigma) per held-out point and compare to actual y) doesn't
+        # need to re-load the full h5ad -- mirrors cv_gamlss_nb.py's ppc_dict.
+        ppc_dict[gene] = dict(y=y.astype(np.float32), mu=mu_all.astype(np.float32),
+                              sigma=sigma_all.astype(np.float32), family=family, stage=stage or route)
         st = z_stats(z)
+        st.update(fold_summary(finfo, N_SPLITS))
         st.update(gene=gene, route=route, stage=stage, nz=int(row["nz"]))
         rows.append(st)
-        route_counts[stage or route] = route_counts.get(stage or route, 0) + 1
+        key = route if pd.isna(stage) or stage == "" else stage
+        route_counts[key] = route_counts.get(key, 0) + 1
 
         if (i + 1) % 50 == 0 or (i + 1) == len(summary):
             elapsed = time.perf_counter() - t0
@@ -238,11 +311,13 @@ def main():
     df.to_csv(out_dir / "cv_stats.csv", index=False)
     with open(out_dir / "cv_zscores.pkl", "wb") as f:
         pickle.dump(zdict, f)
+    with open(out_dir / "cv_ppc.pkl", "wb") as f:
+        pickle.dump(ppc_dict, f)
 
     print("\nCalibration by stage (median):")
     group_key = df["stage"].where(df["stage"] != "", df["route"])
     print(df.groupby(group_key)[["w1", "mean_z", "std_z", "skew_z", "kurt_z"]].median().to_string())
-    print(f"\nSaved -> {out_dir}/cv_stats.csv, cv_zscores.pkl")
+    print(f"\nSaved -> {out_dir}/cv_stats.csv, cv_zscores.pkl, cv_ppc.pkl")
 
 
 if __name__ == "__main__":

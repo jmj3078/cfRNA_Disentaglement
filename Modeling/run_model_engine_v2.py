@@ -88,7 +88,7 @@ funnel_counts = [
 
 fig, ax = plt.subplots(figsize=(8, 5))
 ax.bar(funnel_labels, funnel_counts, color=["#1b9e77", "#7570b3", "#d95f02", "#e7298a", "#66a61e", "#666666"])
-ax.set(ylabel="gene count", title="Final route outcome (demotion chain: C -> B -> intercept fallback)")
+ax.set_ylabel(ylabel="gene count")
 ax.tick_params(axis="x", rotation=30)
 for i, v in enumerate(funnel_counts):
     ax.text(i, v, str(v), ha="center", va="bottom")
