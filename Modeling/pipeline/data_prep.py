@@ -112,13 +112,25 @@ class DiseaseData:
     X_raw: np.ndarray
 
 
-def load_disease_filtered(with_symbols=True, adata=None):
-    """Load filtered disease Z-scores and metadata into a DiseaseData dataclass."""
+def _drop_excluded_genes(Z, gene_names, excluded=None):
+    """Drop config.EXCLUDED_GENES columns from Z + gene_names (analysis-time only; scoring
+    still saved all genes). Applied before OOD/symbol mapping so everything stays aligned."""
+    excluded = config.EXCLUDED_GENES if excluded is None else excluded
+    if not excluded:
+        return Z, gene_names
+    keep = [i for i, g in enumerate(gene_names) if g not in excluded]
+    return Z[:, keep], [gene_names[i] for i in keep]
+
+
+def load_disease_filtered(with_symbols=True, adata=None, excluded_genes=None):
+    """Load filtered disease Z-scores and metadata into a DiseaseData dataclass.
+    config.EXCLUDED_GENES (override via excluded_genes) are dropped from the gene axis."""
     if adata is None:
         adata = load_adata()
     is_hc, phenos, _ = make_phenotypes(adata)
     X_raw = bias_matrix(adata)
     Z_dis, dis_names, gene_names = load_z_disease()
+    Z_dis, gene_names = _drop_excluded_genes(Z_dis, gene_names, excluded_genes)
     dis_pheno = phenos[~is_hc]
     Z_dis, dis_pheno, dis_names, *_ = ood_min_samples_filter(
         Z_dis, dis_pheno, dis_names, X_raw[is_hc], X_raw[~is_hc])

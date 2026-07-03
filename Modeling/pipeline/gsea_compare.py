@@ -109,12 +109,12 @@ def compare_all(save=True):
 
 
 def rare_gene_symbols():
-    """HGNC symbols of the 559 rare-branch genes, for attributing new-in-with_rare terms to
-    the rare covariate GLM. Uses adata.var GeneName (same ensg->symbol map GSEA ranked on),
-    not the DESeq2 csv whose gene universe excludes most very-low-expression rare genes."""
+    """HGNC symbols of the pooled-GLM (rare) genes, for attributing new-in-with_rare terms
+    to the rare covariate GLM. Uses adata.var GeneName (same ensg->symbol map GSEA ranked
+    on), not the DESeq2 csv whose gene universe excludes most very-low-expression genes."""
     import anndata as ad
     ts = pd.read_csv(config.ENGINE_DIR / 'training_summary.csv')
-    rare = ts.loc[ts['branch'].astype(str).str.startswith('rare'), 'gene'].tolist()
+    rare = ts.loc[ts['route'].astype(str) == 'pool', 'gene'].tolist()
     var = ad.read_h5ad(config.PATHS['merged_qc'], backed='r').var
     gname = var['GeneName']
     vn = set(var.index)

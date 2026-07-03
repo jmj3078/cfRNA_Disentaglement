@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Stratified 5-fold CV calibration check for the trained NormativeModelEngineV2.
+"""Stratified 5-fold CV calibration check for the trained NormativeModelEngine.
 
 The route (pool/model) AND the specific stage within route "model" (nbi,
 nb_fixed with its GAIC full-vs-intercept choice, or the final intercept stage --
@@ -10,8 +10,8 @@ model, never re-decides the chain. This mirrors cv_gamlss_nb.py's
 W1/mean/std/skew/kurt diagnostics, computed per gene from pooled held-out z.
 
 Usage:
-    python cv_model_engine_v2.py               # full run
-    python cv_model_engine_v2.py --limit 300   # smoke test
+    python cv_model_engine.py               # full run
+    python cv_model_engine.py --limit 300   # smoke test
 """
 
 import argparse
@@ -32,14 +32,14 @@ from sklearn.preprocessing import StandardScaler
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config
-from model_engine_v2 import (_nb_rqr, _nbi_rqr_from_coeffs, _poisson_rqr,
+from model_engine import (_nb_rqr, _nbi_rqr_from_coeffs, _poisson_rqr,
                              _to_r_matrix, _to_r_vec, _w1_normal,
                              fit_intercept_only_gene, fit_route_b_gene)
 from dispersion_trend import load_trend
 
-MP2 = config.MODELING_PARAMS_V2
-STRATIFY_COL = MP2["stratify_col"]
-N_SPLITS = MP2["n_splits"]
+MP = config.MODELING_PARAMS
+STRATIFY_COL = MP["stratify_col"]
+N_SPLITS = MP["n_splits"]
 
 
 def load_hc():
@@ -223,24 +223,24 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
-    out_dir = config.CV_RESULTS_DIR_V2
+    out_dir = config.CV_RESULTS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("Loading trained engine summary + config...")
-    summary_path = config.ENGINE_DIR_V2 / "training_summary.csv"
+    summary_path = config.ENGINE_DIR / "training_summary.csv"
     summary = pd.read_csv(summary_path, index_col="gene")
     summary = summary[summary["attempted"] & (summary["route"] != "excluded")]
     if args.limit:
         summary = summary.iloc[:args.limit]
 
     # Use the parameters the engine actually trained with (config.pkl), NOT the
-    # current config.MODELING_PARAMS_V2 -- config.py may have changed since training,
+    # current config.MODELING_PARAMS -- config.py may have changed since training,
     # and CV must re-evaluate under the same settings that produced the routes.
-    with open(config.ENGINE_DIR_V2 / "config.pkl", "rb") as f:
+    with open(config.ENGINE_DIR / "config.pkl", "rb") as f:
         engine_cfg = pickle.load(f)
     print(f"  engine config: {engine_cfg}")
 
-    with open(config.ENGINE_DIR_V2 / "rare_glm.pkl", "rb") as f:
+    with open(config.ENGINE_DIR / "rare_glm.pkl", "rb") as f:
         rare_glm_full = pickle.load(f)
     alpha_fn = load_trend()
 

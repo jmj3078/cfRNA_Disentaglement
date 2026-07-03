@@ -10,35 +10,31 @@ MP = config.MODELING_PARAMS
 
 
 def load_engine(h5ad_path=None, engine_dir=None):
-    """Load saved engine (rare branch folded in), or train/build if absent."""
+    """Load the saved engine, or train/build if absent."""
     h5ad_path = h5ad_path or config.H5AD_PATH
     engine_dir = engine_dir or config.ENGINE_DIR
     if (engine_dir / 'genes.pkl').exists():
         return NormativeModelEngine.load(engine_dir)
-    engine = NormativeModelEngine(
-        count_model='nbi', low_det_thr=MP['low_det_thr'], det_rate_min=MP['det_rate_min'],
-        nbi_outlier_z=5.0, nbi_max_iter=2, nbi_max_remove_frac=0.10, lambda_sigma=0.05)
+    engine = NormativeModelEngine()
     engine.load_hc_data(h5ad_path)
-    engine.assign_branches()
     engine.train(verbose=True)
     engine.save(engine_dir)
     return engine
 
 
 def _scores_long(engine, gene_names, Z_all, Y_dis, sa_arr, ph_arr, min_abs_score):
-    """Unified long-format flagged table across all branches (logistic/count/rare).
+    """Unified long-format flagged table across all routes/stages.
 
-    Built from the full Z (combined_all, rare included). NaN cells (unfitted genes) are
-    never flagged since NaN >= thr is False.
+    Built from the full Z (combined_all, rare/pool included). NaN cells (unfitted genes)
+    are never flagged since NaN >= thr is False. `branch` = pool->'rare' else 'count'
+    (historical parquet contract); `score_type` carries the fine-grained stage/route.
     """
     g_arr = np.array(gene_names)
-    raw_branch = np.array([engine.genes[g].branch if g in engine.genes else 'none'
-                           for g in g_arr])
-    # historical parquet labels: logistic | count | rare (NBI/ZINBI collapse to 'count')
-    branch_of = np.where(raw_branch == 'logistic', 'logistic',
-                         np.where(raw_branch == 'rare', 'rare', 'count'))
-    stype_of = np.where(raw_branch == 'logistic', 'logistic_z',
-                        np.where(raw_branch == 'rare', 'rare_glm', 'nbi_z'))
+    recs = [engine.genes.get(g) for g in g_arr]
+    branch_of = np.array([(r.branch if r is not None else 'none') for r in recs])
+    stype_of = np.array([
+        ('rare_glm' if r is None or r.route == 'pool' else f'{r.stage}_z')
+        for r in recs])
     mask = np.abs(Z_all) >= min_abs_score if min_abs_score > 0 else np.isfinite(Z_all)
     row_s, row_g = np.nonzero(mask)
     return pd.DataFrame({
@@ -61,9 +57,9 @@ def _save_rare(result, gene_names, z_rare_path, gene_names_path):
 
 
 def score_all(engine, gene_names, X_dis, Y_dis, sample_names, pheno_names, min_abs_score=3.0):
-    """Long-format anomaly scores across all branches (logistic/count/rare) for a few
+    """Long-format anomaly scores across all routes/stages (count/rare) for a few
     samples. In-memory only -- used by the single-sample inspection notebook."""
-    result = engine.score(X_dis, Y_dis, gene_names=gene_names, seed=42)
+    result = engine.score(X_dis, Y_dis, gene_names=gene_names, seed=42, as_dict=True)
     return _scores_long(engine, list(result['gene_names']), result['combined_all'], Y_dis,
                         np.array(sample_names), np.array(pheno_names), min_abs_score)
 
@@ -78,7 +74,7 @@ def score_full(engine, gene_names, X_dis, Y_dis, dis_names, dis_pheno, thr=None,
     """
     thr = MP['z_flag'] if thr is None else thr
     t0 = time.perf_counter()
-    result = engine.score(X_dis, Y_dis, gene_names=gene_names, seed=42)
+    result = engine.score(X_dis, Y_dis, gene_names=gene_names, seed=42, as_dict=True)
     Z_combined = result['combined']
     print(f'Z matrix: {Z_combined.shape}  ({time.perf_counter()-t0:.1f}s)')
 
@@ -99,7 +95,7 @@ def score_full(engine, gene_names, X_dis, Y_dis, dis_names, dis_pheno, thr=None,
 
 def score_hc(engine, X_hc, Y_hc, gene_names, hc_names, save=True):
     """Score HC samples; save engine-only Z_hc and the unified rare HC artifact."""
-    result = engine.score(X_hc, Y_hc, gene_names=gene_names, seed=42)
+    result = engine.score(X_hc, Y_hc, gene_names=gene_names, seed=42, as_dict=True)
     Z_hc = result['combined']
     if save:
         config.Z_SCORES_DIR.mkdir(parents=True, exist_ok=True)

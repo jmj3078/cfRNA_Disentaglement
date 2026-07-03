@@ -1,4 +1,4 @@
-"""NZ-gated normative model engine (normative-v2)"""
+"""NZ-gated normative model engine (single standard pipeline)."""
 
 import pickle
 import sys
@@ -26,7 +26,7 @@ if str(_ROOT) not in sys.path:
 import config
 from dispersion_trend import build_trend, load_trend, save_trend
 
-MP2 = config.MODELING_PARAMS_V2
+MP = config.MODELING_PARAMS
 
 
 # ---- Pure-Python RQR helpers (mirrors model_engine.py) ------------------
@@ -168,8 +168,8 @@ def _select_outliers(z, outlier_z, max_remove_frac, n_total, n_removed_so_far):
 def fit_route_b_gene(y_train, X_train, alpha_fn, outlier_z, max_iter, max_remove_frac,
                      beta_explode_thr=None, gaic_k=None):
     """Unpenalized mean-only NB (fixed dispersion from the trend), GAIC full-vs-intercept."""
-    beta_explode_thr = MP2["beta_explode_thr"] if beta_explode_thr is None else beta_explode_thr
-    gaic_k = MP2["gaic_k"] if gaic_k is None else gaic_k
+    beta_explode_thr = MP["beta_explode_thr"] if beta_explode_thr is None else beta_explode_thr
+    gaic_k = MP["gaic_k"] if gaic_k is None else gaic_k
     n = len(y_train)
     Xa = np.column_stack([np.ones(n), X_train])
     keep = np.ones(n, dtype=bool)
@@ -231,7 +231,7 @@ def fit_route_b_gene(y_train, X_train, alpha_fn, outlier_z, max_iter, max_remove
 # ---- Gene record ----------------------------------------------------------
 
 @dataclass
-class GeneRecordV2:
+class GeneRecord:
     name: str
     initial_route: str      # "pool" | "model"  (Phase 1 gating)
     route: str = ""          # final route actually used: "pool" | "model" | "excluded"
@@ -257,24 +257,33 @@ class GeneRecordV2:
     fail_reason: str = ""
     w1_train: float = None  # in-sample W1 calibration of the accepted fit (all stages except pool)
 
+    @property
+    def branch(self):
+        """Downstream-taxonomy view: pool route -> 'rare', everything else -> 'count'.
+        Kept so pipeline/scoring._scores_long can label genes without knowing stages."""
+        return "rare" if self.route == "pool" else "count"
+
+
+GeneRecordV2 = GeneRecord  # back-compat alias for engines pickled under the old name
+
 
 # ---- Engine ---------------------------------------------------------------
 
-class NormativeModelEngineV2:
+class NormativeModelEngine:
     def __init__(self, nz_a_max=None, trend_min_nz=None,
                 ridge_lambda_sigma=None, outlier_z=None, max_outlier_iter=None,
                 max_remove_frac=None, beta_explode_thr=None, gaic_k=None,
                 rare_overdisp_thr=None, rare_z_cap=None):
-        self.nz_a_max = nz_a_max or MP2["nz_a_max"]
-        self.trend_min_nz = trend_min_nz or MP2["trend_min_nz"]
-        self.ridge_lambda_sigma = ridge_lambda_sigma or MP2["ridge_lambda_sigma"]
-        self.gaic_k = gaic_k or MP2["gaic_k"]
-        self.outlier_z = outlier_z or MP2["outlier_z"]
-        self.max_outlier_iter = max_outlier_iter or MP2["max_outlier_iter"]
-        self.max_remove_frac = max_remove_frac or MP2["max_remove_frac"]
-        self.beta_explode_thr = beta_explode_thr or MP2["beta_explode_thr"]
-        self.rare_overdisp_thr = rare_overdisp_thr or MP2["rare_overdisp_thr"]
-        self.rare_z_cap = rare_z_cap or MP2["rare_z_cap"]
+        self.nz_a_max = nz_a_max or MP["nz_a_max"]
+        self.trend_min_nz = trend_min_nz or MP["trend_min_nz"]
+        self.ridge_lambda_sigma = ridge_lambda_sigma or MP["ridge_lambda_sigma"]
+        self.gaic_k = gaic_k or MP["gaic_k"]
+        self.outlier_z = outlier_z or MP["outlier_z"]
+        self.max_outlier_iter = max_outlier_iter or MP["max_outlier_iter"]
+        self.max_remove_frac = max_remove_frac or MP["max_remove_frac"]
+        self.beta_explode_thr = beta_explode_thr or MP["beta_explode_thr"]
+        self.rare_overdisp_thr = rare_overdisp_thr or MP["rare_overdisp_thr"]
+        self.rare_z_cap = rare_z_cap or MP["rare_z_cap"]
 
         self.X_hc_scaled = None
         self.Y_hc = None
@@ -339,7 +348,7 @@ class NormativeModelEngineV2:
         for i, g in enumerate(self.pc_gene_names):
             n = int(nz[i])
             route = "pool" if n < self.nz_a_max else "model"
-            self.genes[g] = GeneRecordV2(name=g, initial_route=route, nz=n)
+            self.genes[g] = GeneRecord(name=g, initial_route=route, nz=n)
         counts = pd.Series([r.initial_route for r in self.genes.values()]).value_counts()
         print(f"Phase 1 gating: pool={counts.get('pool',0)}  "
               f"model-candidates(nbi-first)={counts.get('model',0)}  (nz_a_max={self.nz_a_max})")
@@ -587,7 +596,18 @@ class NormativeModelEngineV2:
             z = _nb_rqr(y_col, mu, g["alpha"], seed)
         return np.clip(z, -self.rare_z_cap, self.rare_z_cap).astype(np.float32)
 
-    def score(self, X_test_raw, Y_test, gene_names=None, seed=42):
+    def score(self, X_test_raw, Y_test, gene_names=None, seed=42, as_dict=False):
+        """Score new samples. Returns the raw Z matrix by default (used by CV).
+
+        With as_dict=True, returns the downstream-compatible dict consumed by
+        pipeline/scoring.py:
+          "combined"          : Z with pool-route (rare) columns zeroed -- the canonical
+                                engine-only placeholder contract for Z_disease.npy
+          "combined_all"      : full Z including rare columns (source for the flagged parquet)
+          "gene_names"        : column order (== gene_names)
+          "rare"              : (n_test, n_rare) submatrix of pool-route genes' Z
+          "rare_gene_names"   : list of pool-route gene ids
+        """
         gene_names = gene_names or [g for g in self.genes if self.genes[g].fit_ok]
         X_test = self.scaler.transform(X_test_raw.astype(np.float64))
         n_test, n_gene = len(X_test), len(gene_names)
@@ -614,7 +634,21 @@ class NormativeModelEngineV2:
                     Z[:, j] = _nb_rqr(y_col, mu, rec.alpha, seed + j)
             except Exception:
                 pass
-        return Z
+        if not as_dict:
+            return Z
+
+        rare_idx = [j for j, g in enumerate(gene_names)
+                    if self.genes.get(g) and self.genes[g].route == "pool"]
+        combined = Z.copy()
+        if rare_idx:
+            combined[:, rare_idx] = 0.0
+        return {
+            "combined": combined,
+            "combined_all": Z,
+            "gene_names": list(gene_names),
+            "rare": Z[:, rare_idx] if rare_idx else np.zeros((n_test, 0), np.float32),
+            "rare_gene_names": [gene_names[j] for j in rare_idx],
+        }
 
     # ---- Diagnostics & persistence --------------------------------------------
 
@@ -661,3 +695,7 @@ class NormativeModelEngineV2:
         n_ok = sum(1 for r in engine.genes.values() if r.fit_ok)
         print(f"Engine loaded from {directory}/  ({n_ok} fitted genes)")
         return engine
+
+
+# Resolve genes.pkl pickled under the old module name model_engine_v2.
+sys.modules.setdefault("model_engine_v2", sys.modules[__name__])

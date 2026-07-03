@@ -13,8 +13,9 @@ apply_style()
 MP = config.MODELING_PARAMS
 
 UP, DN = '#d62728', '#1f77b4'
-PALETTE = {'NBI': '#E41A1C', 'ZINBI': '#377EB8', 'Logistic': '#4DAF4A'}
-BRANCH_COLOR = PALETTE
+# Engine stage/route palette (single pipeline: demotion-chain stages + pool route).
+STAGE_COLOR = {'nbi': '#E41A1C', 'nb_fixed': '#377EB8', 'intercept': '#4DAF4A', 'pool': '#984EA3'}
+STAGE_ORDER = ['nbi', 'nb_fixed', 'intercept', 'pool']
 THEME_TINTS = ['#355475', '#AB5D10', '#3A7134', '#7C5471', '#9F3C3C', '#4F807C', '#A68D29', '#6D5141']
 LEGEND_W = 0.15
 
@@ -371,7 +372,7 @@ def plot_selection_overview(method_name, all_results, Z_dis, dis_pheno, dis_name
 
 
 # ── disease_scoring per-sample Manhattan (disease_scoring) ──────────────────
-_SCORE_BRANCH_COLOR = {'count': PALETTE['NBI'], 'logistic': PALETTE['Logistic'], 'rare': '#984EA3'}
+_SCORE_BRANCH_COLOR = {'count': '#E41A1C', 'rare': '#984EA3'}
 
 
 def plot_sample(df, sample_id, phenotype='', top_n=20, z_flag=None):

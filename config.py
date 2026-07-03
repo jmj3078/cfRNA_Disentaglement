@@ -21,17 +21,18 @@ PARAMS = {
 }
 
 # ---------------------------------------------------------------------------
-# Modeling pipeline 
+# Modeling pipeline (single normative engine: NZ-gated demotion chain)
 # ---------------------------------------------------------------------------
 MODELING_DIR   = ROOT / "Modeling"
 ENGINE_DIR     = MODELING_DIR / "engine_state"
 CV_RESULTS_DIR = MODELING_DIR / "CV_Results"
 CV_FIG_DIR     = CV_RESULTS_DIR / "Figures"
-Z_SCORES_DIR   = MODELING_DIR / "Z_scores"          # normative model Z-score 행렬 전용
+Z_SCORES_DIR   = MODELING_DIR / "Z_scores"
 GSEA_DIR       = MODELING_DIR / "GSEA"
 GSEA_FIG_DIR   = GSEA_DIR / "Figures"
 RARE_REF       = Z_SCORES_DIR / "rare_event_ref.pkl"
 R_HELPER       = MODELING_DIR / "gamlss.r"
+DISPERSION_TREND_PATH = ENGINE_DIR / "dispersion_trend.json"
 
 H5AD_PATH = PATHS["merged_qc"]   # normative modeling
 
@@ -65,20 +66,22 @@ BIAS_COLUMNS = [
     "(NP80/NG80)",
 ]
 
+# Genes excluded from DOWNSTREAM analysis only (gene selection / GSEA / signatures).
+# Scoring still scores and saves all genes; data_prep.load_disease_filtered drops these
+# columns. Seeded with the intercept-stage exception genes (EDA_Modeling: irls_diverged +
+# nbi sigma-explode, study-driven mean-shift artifacts rather than covariate-insensitive).
+EXCLUDED_GENES = {
+    "ENSG00000262526.2", "ENSG00000255073.8", "ENSG00000284779.3", "ENSG00000271723.5",
+    "ENSG00000280148.1", "ENSG00000146385.2", "ENSG00000214107.10",
+}
+
 MODELING_PARAMS = {
+    # analysis / downstream (shared by pipeline modules)
     "ood_percentile":  95,
     "min_samples":     5,
     "z_flag":          3.0,
     "stratify_col":    "Batch_ID",
     "n_splits":        5,
-    "det_rate_min":    0.01,
-    "low_det_thr":     0.10,
-    "rare_det_max":    0.01,
-    "rare_overdisp_thr": 2.0,
-    "rare_z_cap":      10.0,
-    "mean_count_min":  2.0,
-    "lr_c":            1.0,
-    "lr_max_iter":     1000,
     "gsea_gene_sets":  ["KEGG_2021_Human", "GO_Biological_Process_2023", "Reactome_2022"],
     "gsea_fdr_thr":    0.05,
     "gsea_top_n":      30,
@@ -86,22 +89,12 @@ MODELING_PARAMS = {
     "gsea_seed":       42,
     "sig_cap_per_theme": 8,
     "emap_sim_thr":    0.50,
-}
-
-# ---------------------------------------------------------------------------
-# Modeling v2 (NZ-gated 4-Phase engine, normative-v2 branch)
-# ---------------------------------------------------------------------------
-ENGINE_DIR_V2     = MODELING_DIR / "engine_state_v2"
-CV_RESULTS_DIR_V2 = MODELING_DIR / "CV_Results_v2"
-CV_FIG_DIR_V2     = CV_RESULTS_DIR_V2 / "Figures"
-DISPERSION_TREND_PATH = ENGINE_DIR_V2 / "dispersion_trend.json"
-
-MODELING_PARAMS_V2 = {
-    "nz_a_max":          7,      
+    # engine (NZ-gated demotion chain)
+    "nz_a_max":          7,
     "trend_min_nz":      30,     # min HC nonzero samples for a gene to enter dispersion-trend fitting
     "alpha_floor":       1e-2,
     "alpha_cap":         50.0,
-    "ridge_lambda_sigma": 0.05,  # L2 penalty on Route C's sigma submodel only (gamlss ridgeVec); mu is never penalized
+    "ridge_lambda_sigma": 0.05,  # L2 penalty on stage nbi's sigma submodel only (gamlss ridgeVec); mu is never penalized
     "outlier_z":         5.0,
     "max_outlier_iter":  3,
     "max_remove_frac":   0.05,
@@ -109,6 +102,4 @@ MODELING_PARAMS_V2 = {
     "gaic_k":            2.0,    # GAIC penalty weight (k=2 == AIC convention, gamlss default)
     "rare_overdisp_thr": 2.0,
     "rare_z_cap":        10.0,
-    "n_splits":          5,
-    "stratify_col":      "Batch_ID",
 }

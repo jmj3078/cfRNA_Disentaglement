@@ -1,10 +1,10 @@
 #!/usr/bin/env python
-"""Train NormativeModelEngineV2 on ALL protein-coding genes and report
+"""Train NormativeModelEngine on ALL protein-coding genes and report
 demotion-chain statistics: nbi -> nb_fixed (GAIC full-vs-intercept) -> intercept
 -> excluded. Route pool (rare pooling) only ever comes from nz < nz_a_max.
 
-  python run_model_engine_v2.py                # full run
-  python run_model_engine_v2.py --limit 200     # smoke test
+  python run_model_engine.py                # full run
+  python run_model_engine.py --limit 200     # smoke test
 """
 
 import argparse
@@ -18,10 +18,10 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config
-from model_engine_v2 import NormativeModelEngineV2
+from model_engine import NormativeModelEngine
 from viz_style import apply_style
 
-SAVE_DIR = config.ENGINE_DIR_V2
+SAVE_DIR = config.ENGINE_DIR
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--limit", type=int, default=None, help="limit to first N genes (smoke test)")
@@ -30,7 +30,7 @@ args = parser.parse_args()
 
 t0 = time.perf_counter()
 
-engine = NormativeModelEngineV2(nz_a_max=args.nz_a_max)
+engine = NormativeModelEngine(nz_a_max=args.nz_a_max)
 engine.load_hc_data()
 engine.build_dispersion_trend()
 engine.assign_routes()

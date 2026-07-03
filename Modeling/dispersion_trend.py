@@ -26,7 +26,7 @@ from statsmodels.nonparametric.smoothers_lowess import lowess
 
 import config
 
-MP2 = config.MODELING_PARAMS_V2
+MP = config.MODELING_PARAMS
 
 
 def weighted_median(x, w):
@@ -38,7 +38,7 @@ def weighted_median(x, w):
 
 def build_trend(Y_hc, min_nz=None, n_bins=25, min_bin=20, lowess_frac=0.5):
     """Y_hc: (n_hc, n_genes) raw HC counts. Returns dict with lowess log-log curve."""
-    min_nz = MP2["trend_min_nz"] if min_nz is None else min_nz
+    min_nz = MP["trend_min_nz"] if min_nz is None else min_nz
     nz = (Y_hc > 0).sum(0).astype(int)
     mean_c = Y_hc.mean(0)
     var_c = Y_hc.var(0)
@@ -67,7 +67,7 @@ def build_trend(Y_hc, min_nz=None, n_bins=25, min_bin=20, lowess_frac=0.5):
 
     return {
         "a0": None, "a1": None,  # legacy parametric slot, unused (lowess is canonical)
-        "alpha_floor": MP2["alpha_floor"], "alpha_cap": MP2["alpha_cap"],
+        "alpha_floor": MP["alpha_floor"], "alpha_cap": MP["alpha_cap"],
         "min_nz": min_nz, "n_reliable": int(reliable.sum()), "n_bins_used": len(bins),
         "lowess_logmu": sm_curve[:, 0].tolist(), "lowess_logsigma": sm_curve[:, 1].tolist(),
     }
