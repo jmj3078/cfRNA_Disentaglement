@@ -68,13 +68,17 @@ def load_z_disease():
     return Z, dis_names, gene_names
 
 
-def load_z_hc():
+def load_z_hc(excluded_genes=None):
+    """HC Z matrix, gene axis filtered by config.EXCLUDED_GENES so it stays aligned to
+    load_disease_filtered's Z_dis (both drop the same gene columns)."""
     if not config.Z_HC.exists():
         raise FileNotFoundError(
             f'{config.Z_HC} not found. Run disease_scoring notebook or scoring.score_hc() first.')
     Z = np.load(config.Z_HC)
     names = np.load(config.Z_HC_NAMES, allow_pickle=True).tolist()
+    gene_names = np.load(config.Z_GENE_NAMES, allow_pickle=True).tolist()
     Z, _ = clean_z(Z)
+    Z, _ = _drop_excluded_genes(Z, gene_names, excluded_genes)
     return Z, names
 
 
