@@ -82,6 +82,15 @@ def load_z_hc(excluded_genes=None):
     return Z, names
 
 
+def hc_batch_ids(hc_names, adata=None):
+    """Batch_ID per HC sample, aligned to the Z_hc row order (its sample names)."""
+    if adata is None:
+        adata = load_adata()
+    b = adata.obs[MP['stratify_col']].astype(str)
+    b.index = adata.obs_names.astype(str)
+    return b.reindex([str(n) for n in hc_names]).values
+
+
 def ood_min_samples_filter(Z_dis, dis_pheno, dis_names, X_hc, X_dis,
                            percentile=None, min_samples=None, ood=None):
     """Apply OOD + min-samples filters; return (Z, pheno, names, ood, keep, excluded)."""

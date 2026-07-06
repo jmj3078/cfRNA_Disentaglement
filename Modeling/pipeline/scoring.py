@@ -138,3 +138,29 @@ def score_disease_with_rare(dd, engine=None):
     explicit, opt-in 'with_rare' GSEA / gene-selection run compared side-by-side against
     the canonical (engine-only) dd.Z_dis."""
     return _overlay_rare(dd.Z_dis, dd.gene_names, dd.dis_names)
+
+
+STAGES = ('nbi', 'nb_fixed', 'intercept', 'pool')
+
+
+def gene_stage(gene_names, engine_dir=None):
+    """Per-gene demotion-chain stage/route aligned to gene_names, read from the engine's
+    training_summary (model genes -> nbi/nb_fixed/intercept; pool route -> 'pool')."""
+    engine_dir = engine_dir or config.ENGINE_DIR
+    ts = pd.read_csv(engine_dir / 'training_summary.csv')
+    stage = np.where(ts['route'].values == 'pool', 'pool', ts['stage'].values.astype(str))
+    smap = dict(zip(ts['gene'].values, stage))
+    return np.array([smap.get(g, 'nbi') for g in gene_names])
+
+
+def stage_masked_z(dd, stages, engine_dir=None):
+    """Disease Z restricted to a chosen set of engine stages/routes: columns whose gene was
+    fit at a stage NOT in `stages` are zeroed (so GSEA/selection see only those routes). If
+    'pool' is in `stages` the rare covariate scores are overlaid on the pool columns first.
+    e.g. stages=('nbi',) = full-NBI genes only; ('nbi','nb_fixed','intercept') = engine-only
+    'no_rare'; add 'pool' for 'with_rare'."""
+    stages = set(stages)
+    st = gene_stage(dd.gene_names, engine_dir)
+    Z = _overlay_rare(dd.Z_dis, dd.gene_names, dd.dis_names) if 'pool' in stages else dd.Z_dis.copy()
+    Z[:, ~np.isin(st, list(stages))] = 0.0
+    return Z

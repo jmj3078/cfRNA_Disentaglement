@@ -273,59 +273,6 @@ def _curve_grid(curves, value_of, kind, color, label, suptitle, fname, fig_dir, 
         plt.savefig(fig_dir / fname, bbox_inches='tight', dpi=150)
     plt.show()
 
-
-NEG_MODE_LABEL = {'real_hc': 'real HC cohort', 'null_fixed': 'healthy null N(0,1)',
-                  'null_matched': 'healthy null N(0,1), count-matched'}
-
-
-def plot_validation_curves(method, curves, binary_df, multi_df, controls,
-                           neg_modes=None, fig_dir=None, save=True):
-    """Nested-CV validation in the familiar shadow-curve idiom: binary ROC + PR grids for
-    each negative mode (real_hc / null_fixed / null_matched), multiclass disease-vs-disease
-    ROC + PR, and the real-HC-vs-null calibration panel (hugs diagonal/baseline if
-    calibrated)."""
-    fig_dir = fig_dir or config.CV_FIG_DIR
-    fig_dir.mkdir(parents=True, exist_ok=True)
-    cv = curves[method]
-    neg_modes = neg_modes or list(cv['binary'].keys())
-    mdf = multi_df[multi_df['method'] == method].set_index('phenotype')
-
-    for nm in neg_modes:
-        bdf = binary_df[(binary_df['method'] == method) & (binary_df['neg_mode'] == nm)] \
-            .set_index('phenotype')
-        lab = NEG_MODE_LABEL.get(nm, nm)
-        _curve_grid(cv['binary'][nm], bdf['auc'].to_dict(), 'roc', '#377eb8', 'LogReg',
-                    f'Disease vs {lab} — ROC (nested) — {method}  ({MP["n_splits"]}-fold, shadow=±1 SD)',
-                    f'val_roc_binary_{method}_{nm}.png', fig_dir, save)
-        _curve_grid(cv['binary'][nm], bdf['auprc'].to_dict(), 'pr', '#377eb8', 'LogReg',
-                    f'Disease vs {lab} — PR (nested) — {method}  (dashed=prevalence baseline)',
-                    f'val_pr_binary_{method}_{nm}.png', fig_dir, save)
-    _curve_grid(cv['multi'], mdf['auc_mc'].to_dict(), 'roc', '#4daf4a', 'OVR',
-                f'Disease vs Disease ROC (nested) — {method}',
-                f'val_roc_multiclass_{method}.png', fig_dir, save)
-    _curve_grid(cv['multi'], mdf['auprc_mc'].to_dict(), 'pr', '#4daf4a', 'OVR',
-                f'Disease vs Disease PR (nested) — {method}  (dashed=prevalence baseline)',
-                f'val_pr_multiclass_{method}.png', fig_dir, save)
-
-    ctrl_auc, _, hc = controls[method]
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 4))
-    _roc_shadow(ax1, hc['roc'], '#999999', 'HC vs null', ctrl_auc)
-    ax1.plot([0, 1], [0, 1], 'k--', lw=0.7, alpha=0.35)
-    ax1.set_xlim(-0.05, 1.05); ax1.set_ylim(-0.05, 1.05)
-    ax1.set_xlabel('FPR'); ax1.set_ylabel('TPR'); ax1.set_title('ROC')
-    ax1.legend(frameon=False, loc='lower right')
-    _pr_shadow(ax2, hc['pr'], '#999999', 'HC vs null', np.nan, prevalence=hc['prevalence'])
-    ax2.set_xlim(-0.05, 1.05); ax2.set_ylim(-0.05, 1.05)
-    ax2.set_xlabel('Recall'); ax2.set_ylabel('Precision'); ax2.set_title('PR')
-    ax2.legend(frameon=False, loc='upper right')
-    fig.suptitle(f'Calibration control: real HC vs healthy null — {method}  '
-                 f'(~0.5 / baseline = calibrated)', y=1.02)
-    plt.tight_layout()
-    if save:
-        plt.savefig(fig_dir / f'val_negcontrol_hc_{method}.png', bbox_inches='tight', dpi=150)
-    plt.show()
-
-
 def plot_selection_overview(method_name, all_results, Z_dis, dis_pheno, dis_names,
                             gene_names, fig_dir=None, save=True):
     """Save clustermap and UMAP for the selected gene set (heatmap_{m}.png, umap_{m}.png)."""
