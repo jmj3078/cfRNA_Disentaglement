@@ -322,6 +322,41 @@ MGUS의 신규 신호는 두 갈래로 수렴한다: (1) MHC class I/II 항원�
 
 ---
 
+## 대조군 비교 분석 (Comparative Signatures)
+
+동일 장기·유사 면역맥락을 공유하는 표현형 쌍에서 "무엇이 다른가"를 직접 대조. only_nbi/with_rare 공통 novelty 백본이 아니라, 두 표현형의 with_rare 유의 term(FDR<0.05, housekeeping 제외) 집합을 직접 차집합하여 각 쪽에만 있는 신호를 추출하고 Open Targets/PubMed로 검증했다.
+
+### 췌장암 vs 췌장염 (Pancreatic Cancer (Moore) vs Pancreatitis (Moore))
+
+두 표현형은 같은 장기(췌장)를 공유하지만 급성 염증과 악성 종양이라는 뚜렷이 다른 병태생리를 갖는다. with_rare에서 각 쪽에만 유의한 축이 정확히 이 구분과 정합한다.
+
+- **췌장암 특이 축 — ECM 조직화/탈분화(desmoplasia) + 면역회피(하향).** `Extracellular Matrix Organization`(NES +2.27/+2.26, lead **DDR2, NF1**), `Non-integrin Membrane-ECM Interactions`(+2.37, DDR2)이 췌장염에는 없다. DDR2(collagen receptor)·PDAC 문헌 존재(PubMed DDR2 AND pancreatic cancer ≈12건, desmoplasia/ECM 일반 문헌 ≈189건) — PDAC의 확립된 결합조직형성(desmoplastic stroma) 특징과 정합. 동시에 `Primary Immunodeficiency`(NES −2.47, lead **LCK, PTPRC, BTK**)와 `Translocation Of ZAP-70 To Immunological Synapse`(−2.46)이 하향 — T세포 시냅스 신호 약화는 종양의 면역회피(immune evasion)와 방향이 일치.
+- **췌장염 특이 축 — 급성 혈관투과성/부종 + 분비신호(cAMP/cGMP) + 만성 지방화생.** `VEGFR2 Mediated Vascular Permeability`(+2.06)·`Endothelial Cell Differentiation`(+2.03)은 급성 췌장염의 특징적 혈관투과성 항진·부종과 정합(PubMed acute pancreatitis AND vascular permeability ≈219건). `cAMP-mediated Signaling`(+1.97)·`cGMP-mediated Signaling`(+2.03, lead **AQP1, PDE2A, PDE7B, GLP1R**)은 외분비 선방세포(acinar)의 정상 분비신호 축이 췌장 손상 시 재활성화되는 패턴(PubMed pancreatic acinar cAMP secretion pancreatitis ≈157건). `Regulation Of Fat Cell Differentiation`(+1.96, lead **RUNX1T1, PPARG**)은 만성 췌장염의 지방화생(fatty replacement)과 정합.
+
+**해석:** 두 표현형이 "췌장 질환"으로 뭉뚱그려지지 않고, cfRNA Z-score만으로 **암=구조적 리모델링(ECM/desmoplasia)+면역회피, 염증=급성 혈관/분비 반응+만성 지방화생**이라는 병태생리적으로 구별되는 축을 각각 복원했다. 두 축 모두 기지 생물학이며 housekeeping/rare artifact가 아니다.
+
+### 면역관문억제제 심근염 vs ICI 치료 암 코호트 (ICI-m (Raissadati) vs ICI-treated Cancer (Raissadati))
+
+"왜 하필 일부 환자에서 심근염이 발생하는가"에 대해, ICI-m에만 있고 혼합 ICI-treated Cancer 코호트에는 없는 두 축이 기전적으로 정확히 들어맞는 스토리를 만든다.
+
+- **심장근육 수축(자가항원 소스) — Cardiac Muscle Contraction (NES +2.28, lead MYH7/MYH6, pos ctrl).** MYH6/MYH7(심근 미오신)은 ICI 심근염의 **확립된 자가항원**이다: skill로 검증한 PubMed 문헌 — PMID 36385524 "T cells specific for α-myosin drive immunotherapy-related myocarditis" (Nature, 2022)와 후속 PMID 39378095 "Injury-induced myosin-specific tissue-resident memory T cells drive immune checkpoint inhibitor myocarditis" (2024)가 α-미오신 특이 T세포가 ICI 심근염을 직접 유발함을 실증했다. Open Targets MYH7 x hypertrophic cardiomyopathy 0.892, cardiomyopathy 0.758(강함).
+- **면역프로테아좀/항원 교차제시 — Proteasome·ER-Phagosome·Cross-presentation Of Soluble Exogenous Antigens (NES +2.16~+2.38, lead **PSMB8** 등, pos ctrl, n=15 term).** PSMB8(면역프로테아좀 소단위 LMP7)은 IFN-γ 유도성이며, skill 검증 결과 면역프로테아좀-심근염/심부전 문헌 13건 확인(대표 PMID 38570171 "Mapping the interplay of immunoproteasome and autophagy in different heart failure phenotypes", 2024). 항원 교차제시 경로가 활성화되어 있다는 것은, 손상된 심근세포에서 유래한 미오신 자가항원이 MHC-I 경로로 제시되어 위 미오신-특이 T세포를 활성화하는 기전과 조립이 맞는다.
+- **대조: ICI-treated Cancer(혼합 암 코호트)에는 이 축이 없다.** 대신 `Allograft Rejection`/`Graft-versus-host Disease`(범용 동종면역 활성화 언어)와 대규모 세포주기/유사분열 하향(45개 term, Mitotic Spindle/Kinetochore 등)이 특이적으로 나타나는데, 이는 이질적 종양 벌크의 증식 억제 신호로 보이며 단일 기전으로 수렴하지 않는다(OT 참조질환 없음, 앞서 리포트에서 이미 "해석 유보" 명시).
+
+**해석:** ICI-m 특이 신호는 **"심근 미오신 자가항원이 면역프로테아좀 경로로 교차제시되어 미오신-특이 T세포를 활성화한다"**는, 최근 2편의 Nature급 기전 논문으로 뒷받침되는 구체적 스토리를 cfRNA만으로 재현했다. 이는 이번 리포트 전체에서 가장 강한 기전적 서사다.
+
+### CAD 심부전 진행군 vs 비진행군 (CAD_HF+ (Ward) vs CAD_HF- (Ward))
+
+동일한 관상동맥질환(CAD) 환자군 내에서, 심부전(HF)으로 진행한 군과 진행하지 않은 군을 가르는 축.
+
+- **HF+ 특이 축 — Collagen/FGFR 섬유화 리모델링(pos ctrl).** `Collagen Chain Trimerization`(+2.40, lead **COL6A3**)·FGFR1/2 리간드 결합(+2.15~+2.28, lead **FGF5**)이 HF−에는 없다. Open Targets COL6A3 x coronary artery disorder 0.445, myocardial infarction 0.339; FGF5 x coronary artery disorder 0.548. PubMed COL6A3+심장/섬유화 문헌 ≈87건(대표 PMID 41174767, "vascular fibrosis", Genome Med 2025) — **섬유화 리모델링은 심부전으로의 구조적 진행과 정합하는 확립 축**.
+- **HF− 특이 축 — RAAS/GPCR 혈관수축·혈소판 반응성(섬유화 없이, pos ctrl).** `G Protein-Coupled Receptor Signaling, Coupled To Cyclic Nucleotide`(NES +3.76, lead **AGT**)와 purinergic `P2Y Receptors`(+2.12, lead **P2RY12**)가 HF+에는 없다. Open Targets AGT x essential hypertension 0.627, hypertensive disorder 0.606(강한 RAAS/혈압 축); P2RY12 x coronary artery disorder 0.602, acute coronary syndrome 0.613, myocardial infarction 0.620(항혈소판제 clopidogrel/ticagrelor의 표적 유전자로 확립). GAG 합성/O-당화 이상(GALNT3/12 결손 관련 term)도 HF−에서만 유의.
+- **대조 해석:** HF+는 구조적 섬유화(collagen/FGF)로 수렴하고, HF−는 혈역학적 반응성(RAAS 혈관긴장도·혈소판 응집)에 머물러 아직 구조적 리모델링으로 진행하지 않은 상태로 읽힌다.
+
+**해석:** "같은 CAD인데 왜 어떤 환자만 심부전으로 진행하는가"에 대해, cfRNA normative Z가 **HF+ = 섬유화 구조 리모델링(비가역적 진행 표지자 후보), HF− = RAAS/혈소판 혈역학적 반응성(가역적/안정 단계)** 이라는 임상적으로 의미 있는 이분을 보였다. 두 축 모두 각 유전자가 CAD/CV 질환에 강한 Open Targets 근거를 가지며(0.45~0.63), housekeeping이나 rare-artifact가 아니다.
+
+---
+
 ## 종합
 
 1. **rare 포함은 방향 보존적·가산적.** 20개 전 질병에서 공유 term의 NES 부호 일치율 1.0. rare 분기는 기존 신호를 뒤집지 않고 신규 유의 경로만 추가(+49~+172). only_nbi와 모순되는 방향 전환은 한 건도 없다.
@@ -334,4 +369,5 @@ MGUS의 신규 신호는 두 갈래로 수렴한다: (1) MHC class I/II 항원�
 
 5. **skill 교차검증이 가설을 실제로 기각한 사례.** 자간전증의 IFN-λ/IFNL3 항바이러스 가설은 검증 결과 근거가 없었고("viral" translation term은 RPL10L retrogene이 주도한 번역기구 term의 오인, IFNL3-PE PubMed 0·OT 0건), 대신 태반 리보솜/번역 억제 축(RPL10L 제외 시에도 성립)과 시냅스-접착(PTPRD/LRFN2, OT GWAS 0.71/0.86)이 실제 지지 신호였다. 기억이 아닌 DB/문헌 조회에 근거한 보수적 해석의 가치를 보여준다.
 
-6. **결론.** with_rare는 정규화 모델의 신호를 방향 보존적으로 확장하며, 그 부가가치의 핵심은 rare 분기 자체보다 **count route가 복원한 확립 질병 축의 강화**에 있다. rare 분기의 고유 기여는 대부분 저발현 아티팩트이나, PLA2G10 등 소수의 검증가치 후보를 표면화한다. 모든 개별 유전자 근거는 `GSEA/Reference/`에서 추적 가능.
+6. **유사 표현형 쌍의 직접 대조가 가장 설명력 높은 서사를 만든다.** "대조군 비교 분석" 절(췌장암 vs 췌장염, ICI-m vs ICI-treated Cancer, CAD_HF+ vs CAD_HF−)에서 확인했듯, 같은 장기/맥락을 공유하는 두 표현형의 with_rare 유의 term을 직접 차집합하면 개별 질병 리포트보다 뚜렷한 병태생리적 구분이 드러난다. 특히 ICI-m의 **심근 미오신 자가항원 - 면역프로테아좀 교차제시** 축은 2022/2024 Nature급 기전 논문으로 뒷받침되는, 이 리포트 전체에서 가장 강한 서사다.
+7. **결론.** with_rare는 정규화 모델의 신호를 방향 보존적으로 확장하며, 그 부가가치의 핵심은 rare 분기 자체보다 **count route가 복원한 확립 질병 축의 강화**에 있다. rare 분기의 고유 기여는 대부분 저발현 아티팩트이나, PLA2G10 등 소수의 검증가치 후보를 표면화한다. 모든 개별 유전자 근거는 `GSEA/Reference/`에서 추적 가능.

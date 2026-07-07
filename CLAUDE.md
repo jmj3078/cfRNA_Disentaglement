@@ -23,35 +23,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   apply_style()
   ```
 
-### 프로젝트 디렉토리 구조 (경로 = 간단설명 단일 소스)
-유지 규칙: 모든 경로/구조 정보는 아래 트리에 **경로 : 한 줄 설명** 형식으로만 기록한다. 별도 상세 섹션을 만들어 중복시키지 말 것. config.py나 디렉토리가 바뀌면 본 트리만 갱신.
-작업 환경 : conda env "scRNA" 에서 작업
-./config.py : 경로·파라미터 단일 소스. 모든 코드가 재선언 없이 import. ROOT/DATA_DIR/PIPELINE_DIR · MODELING_DIR/ENGINE_DIR/CV_RESULTS_DIR/CV_FIG_DIR/Z_SCORES_DIR/GSEA_DIR/BENCHMARK_DIR(DESEQ2_RESULTS_DIR/DESEQ2_GSEA_DIR/DESEQ2_COV_*) · DISPERSION_TREND_PATH · H5AD_PATH · Z_DISEASE/Z_HC/Z_RARE_DISEASE/Z_RARE_HC/Z_RARE_GENE_NAMES 등 Z 경로 · RARE_GLM · EXCLUDED_GENES(downstream 분석에서만 제외할 유전자 set, 기본 7개 intercept-stage 예외 유전자) · PATHS{merged_raw/biases/qc} · BIAS_COLUMNS · MODELING_PARAMS{분석키:ood_percentile=95/min_samples=5/z_flag=3.0/stratify_col/n_splits=5/gsea_*/emap_sim_thr=0.50 + 엔진키:nz_a_max=7/trend_min_nz=30/alpha_floor·cap/ridge_lambda_sigma/outlier_z/max_outlier_iter/max_remove_frac/beta_explode_thr/gaic_k/rare_overdisp_thr/rare_z_cap} · PARAMS(EDA용)
-./viz_style.py : apply_style() 공통 matplotlib 테마 (모든 시각화 필수)
-./CLAUDE.md · ./README.md : 공용 문서
-./_legacy/ : 폐기 파일·임시파일. 참고·수정·읽기 금지
-./Data/ : 분석 핵심 데이터 (권한 없이 수정 금지)
-./OpenAccess_nfcore/ : 주 분석 데이터(adata) 원본·전처리본 (권한 없이 수정 금지). config.PATHS.merged_qc = 주 h5ad
-./RPM_nfcore/ : Validation 실험실 데이터 (추가 예정)
-./Saved_Pipeline/ : config.PIPELINE_DIR (LogisticGP·Z matrix, 생성 예정)
-./EDA/ : 코호트 QC·batch/bias 교란분석. cwd=EDA 가정, 루트 config/viz_style를 Path.cwd().parent로 sys.path 등록해 import
-./EDA/analysis_cfrna_cohorts.ipynb : QC→PCA→RDA 교란분석 (helper+plot 호출)
-./EDA/analysis_helper.py : QC·bias 정량화 + RDA 분산분해 엔진 (자체적으로 root를 sys.path 등록)
-./EDA/analysis_plot.py : analysis_helper 전용 시각화
-./EDA/VariousNormalizationMethods_OpenAccess.R : 정규화 레이어 생성 (R, PROJECT_ROOT 절대경로)
-./EDA/Analysis_Results/ : 위 노트북 출력 (노트북에서 ./Analysis_Results/ 상대경로)
-./Modeling/ : cfRNA Normative Modeling 본체
-./Modeling/*.py : model_engine(NZ 게이팅 demotion chain 엔진 본체, 아래 핵심 아키텍처 참조) · run_model_engine(→engine_state/, demotion 통계+funnel figure, --limit smoke test) · cv_model_engine(엔진 5-fold CV → CV_Results/, cv_stats.csv·cv_zscores.pkl·cv_ppc.pkl) · dispersion_trend(Phase 0 covariate-free MoM dispersion trend) · sample_filter(MahalanobisFilter OOD) · gene_selectors(proportion/effect_size/svd + effect_size_specific[방안1 질병간대조+방안2 ubiquity damping] + l1_logistic[OVR L1 판별]) · build_disease_reference(Open Targets 질병별 참조 유전자 JSON 재생성). 경로/BIAS_COLUMNS/임계값 전부 config import
-./Modeling/pipeline/ : 분석·시각화 모듈 패키지. data_prep(공통 전처리:load_adata/study-split/OOD·MIN_SAMPLES/Z 로드/EXCLUDED_GENES 제외)·scoring·selection·enrichment·signatures(THEMES+heuristic/emap 군집)·cv_diagnostics(엔진 CV 진단: calibration·PPC 시각화+요약 CSV, _model_diagnostics.ipynb의 로직 본체)·benchmark(DESeq2 vs Normative 유전자 단위 비교)·gsea_compare(GSEA term-level 비교: with_rare↔no_filter↔DESeq2 겹침 통계+diff+Open Targets DB 교차검증. load_sets/compare_all/validate_rare_novel/deseq2_coverage/db_hit_rates) + plots(시각화 전용). __init__이 root를 sys.path 등록. 노트북은 thin runner(import+호출)로 동일 산출물 재현
-./Modeling/engine_state/ : run_model_engine.py 산출 (학습된 engine) = config.ENGINE_DIR. genes.pkl(GeneRecord dict) · scaler.pkl · config.pkl · rare_glm.pkl(pooled rare GLM 계수) · training_summary.csv(route/stage/nz/fail_reason) · dispersion_trend.json(=config.DISPERSION_TREND_PATH) · route_demotion_summary.png
-./Modeling/Z_scores/ : normative model Z-score 산출물 전용 (Z_disease/sample/gene/hc/hc_names.npy = engine-only canonical · Z_rare_disease/hc/gene_names.npy = rare 공변량 GLM 별도 아티팩트 · disease_scores_flagged.parquet = 전 분기 통합 long표) = config.Z_SCORES_DIR
-./Modeling/CV_Results/ : 엔진 CV·진단 출력 = config.CV_RESULTS_DIR. cv_stats.csv(per-gene held-out calibration) · cv_zscores.pkl · cv_ppc.pkl(per-point y/mu/sigma) · cv_summary_by_stage.csv · ppc_summary_stats.csv · discrimination_summary.csv/discrimination_by_disease.csv(selection.discrimination_control 산출: random floor/batch-null/per-disease AUC) · Figures/(cv_diagnostics.py + plots.plot_discrimination_control 산출). Z 행렬은 여기 아님(→Z_scores/)
-./Modeling/GSEA/ : GSEA 산출 (조건별 하위폴더 = _gene_enrichment.ipynb CONDITIONS의 label, 각 gsea_result_*.csv · Clusters/ · Figures/) + 해석 리포트. 조건 = 포함할 엔진 stage/route 집합(scoring.stage_masked_z로 그 stage 외 유전자 열 0). no_filter=nbi+nb_fixed+intercept(engine-only count route, rare 미포함, 기존 이름 유지=gsea_compare/downstream 호환) · with_rare=nbi+pool(full-NBI+rare covariate GLM만) · nbi_only=nbi만. ubiquity/artifact 필터는 폐기. no_filter/GSEA_Master_Report.md · with_rare/GSEA_Master_Report.md(DB+20질병 문헌검증) · Analysis_Provenance.md(rare/DESeq2 비교에 쓴 DB 엔드포인트·쿼리·질병ID·PubMed 기록)
-./Modeling/Benchmark/ : Normative Modeling vs DESeq2 정성/정량 비교 전용 = config.BENCHMARK_DIR. deseq2_results/(deseq2_*.csv·gsea_result_*.csv per phenotype, PyDESeq2 within-study 공변량미보정=config.DESEQ2_RESULTS_DIR) · deseq2_gsea/(공변량미보정 GSEA=config.DESEQ2_GSEA_DIR) · deseq2_covariate_results/(공변량보정 DESeq2 결과=config.DESEQ2_COV_RESULTS_DIR, run_deseq2_covariate.py 산출) · deseq2_covariate_gsea/(공변량보정 GSEA=config.DESEQ2_COV_GSEA_DIR) · disease_reference/(질병별 Open Targets association 상위 300 유전자 JSON = DB 교차검증 참조) · gsea_compare/(gsea_compare.py 산출: overlap_stats.csv · rare_novel_validated/summary.csv · deseq2_coverage.csv · deseq2_cov_vs_nocov_overlap.csv · deseq2_cov_db_hits.csv · db_hit_rates*.csv · {comparison}__{which}__{pheno}.csv diff 리스트) · rescued_genes_*.csv(분석1 산출) · DESeq2_vs_Normative_Report.md(term 커버리지/방향불일치 비교) · Figures/
-./Modeling/노트북 (모두 thin runner) : disease_scoring(→Z_scores/ 재생성) → gene_selection → gene_enrichment → gsea_heuristic_signatures(수동 theme,PPT용) · model_diagnostics(cv_diagnostics.run_all 호출: 엔진 CV calibration·PPC 그림+CSV) · gsea_rare_deseq2_comparison(rare 포함/미포함/DESeq2 3자 GSEA term 비교, gsea_compare 호출)
-./Modeling/dispersion_trend.py : Phase 0. 공변량 무시하고 raw count에서 gene별 NB2 MoM dispersion(sigma=(var-mean)/mean^2) 계산 → nz>=trend_min_nz(30)만 신뢰 → log(mu) 구간별 nonzero-가중 중앙값 → lowess(log-log) 평활. load_trend()가 alpha_of(mean)->dispersion 클로저 반환(alpha_floor~alpha_cap 클립). stage nb_fixed/intercept 분산 고정에 사용
-./Modeling/model_engine.py : `NormativeModelEngine`(엔진 본체). NZ 게이팅 + demotion chain (아래 핵심 아키텍처 참조)
-./Modeling/run_model_engine.py : 엔진 학습 스크립트 → config.ENGINE_DIR(engine_state/). demotion-chain 통계+funnel figure 출력. `--limit N`(smoke test) · `--nz-a-max`
+### 프로젝트 디렉토리 구조
+경로·파라미터는 전부 `config.py`가 단일 소스이며 코드에서 재선언 없이 import한다. 아래는 각 디렉토리/모듈의 **역할**만 기록(경로 문자열·변수명은 반복하지 않음). 구조가 바뀌면 이 트리만 갱신.
+작업 환경 : conda env "scRNA"
+
+- `_legacy/` : 폐기 파일. 참고·수정·읽기 금지
+- `Data/`, `OpenAccess_nfcore/` : 핵심 데이터 원본·전처리본 (권한 없이 수정 금지)
+- `RPM_nfcore/` : Validation 실험실 데이터 (추가 예정)
+- `Saved_Pipeline/` : LogisticGP·Z matrix (생성 예정)
+- `viz_style.py` : `apply_style()` 공통 matplotlib 테마 (모든 시각화 필수)
+- `EDA/` : 코호트 QC·batch/bias 교란분석 (cwd=EDA 가정). `analysis_cfrna_cohorts.ipynb`(QC→PCA→RDA) · `analysis_helper.py`(QC·bias 정량화+RDA 분산분해 엔진) · `analysis_plot.py`(전용 시각화) · `VariousNormalizationMethods_OpenAccess.R`(정규화 레이어 생성) · `Analysis_Results/`(출력)
+- `Modeling/` : cfRNA Normative Modeling 본체 (아래 핵심 아키텍처 참조)
+  - `dispersion_trend.py` : Phase 0, 공변량 무시 raw count NB2 MoM dispersion → lowess 평활 트렌드. `load_trend()`가 `alpha_of(mean)` 클로저 반환
+  - `model_engine.py` : `NormativeModelEngine` 본체 (NZ 게이팅 + demotion chain)
+  - `run_model_engine.py` : 엔진 학습 → `engine_state/`. demotion 통계+funnel figure. `--limit N`(smoke test) · `--nz-a-max`
+  - `cv_model_engine.py` : 엔진 5-fold CV → `CV_Results/`
+  - `sample_filter.py` : MahalanobisFilter OOD 필터
+  - `gene_selectors.py` : proportion/effect_size/svd + effect_size_specific(방안1 질병간대조+방안2 ubiquity damping) + l1_logistic(OVR L1 판별)
+  - `build_disease_reference.py` : Open Targets 질병별 참조 유전자 JSON 재생성
+  - `pipeline/` : 실제 분석·시각화 로직 패키지 (노트북은 thin runner). `data_prep`(공통 전처리: load_adata/study-split/OOD·MIN_SAMPLES/Z 로드/EXCLUDED_GENES 제외) · `scoring` · `selection` · `enrichment` · `signatures`(THEMES+heuristic/emap 군집) · `cv_diagnostics`(엔진 CV calibration·PPC 시각화+요약 CSV) · `benchmark`(DESeq2 vs Normative 유전자 단위 비교) · `gsea_compare`(GSEA term-level 3자 비교: with_rare/no_filter/DESeq2 겹침·diff·Open Targets DB 교차검증) · `plots`
+  - `engine_state/` : 학습된 엔진 산출물. genes.pkl(GeneRecord dict) · scaler.pkl · config.pkl · rare_glm.pkl(pooled rare GLM 계수) · training_summary.csv(route/stage/nz/fail_reason) · dispersion_trend.json · route_demotion_summary.png
+  - `Z_scores/` : Z-score 산출물. Z_disease/hc*.npy = engine-only canonical(pool 컬럼 0 placeholder) · Z_rare_*.npy = rare 공변량 GLM 별도 아티팩트 · disease_scores_flagged.parquet = 전 route 통합 long표(z_flag=3.0 이진 플래그)
+  - `CV_Results/` : cv_stats.csv(per-gene held-out calibration) · cv_zscores.pkl · cv_ppc.pkl · cv_summary_by_stage.csv · discrimination_summary/by_disease.csv(random/batch-null/disease AUC) · Figures/
+  - `GSEA/` : 조건별 하위폴더(no_filter=nbi+nb_fixed+intercept, with_rare=nbi+pool, nbi_only=nbi만; scoring.stage_masked_z로 그 stage 외 유전자 열 0) 각 gsea_result_*.csv·Clusters/·Figures/ + Master_Report.md(해석 리포트) + Analysis_Provenance.md
+  - `Benchmark/` : DESeq2 vs Normative 비교. deseq2_results/gsea(공변량미보정) · deseq2_covariate_results/gsea(공변량보정) · disease_reference/(Open Targets 상위 300 유전자 JSON) · gsea_compare/(overlap_stats·rare_novel_validated·deseq2_coverage·db_hit_rates 등) · DESeq2_vs_Normative_Report.md · Figures/
+  - 노트북(모두 thin runner) : disease_scoring(→Z_scores/) → gene_selection → gene_enrichment → gsea_heuristic_signatures(PPT용) · model_diagnostics(cv_diagnostics.run_all) · gsea_rare_deseq2_comparison(gsea_compare 호출)
 
 ### pipeline/ 주요 진입점 (노트북에서 실제 호출되는 함수)
 - `data_prep.load_disease_filtered()` → `DiseaseData` dataclass (Z_dis · dis_pheno · dis_names · gene_names · gene_syms · adata · is_hc · X_raw) 반환. 분석 노트북의 공통 진입점.
