@@ -3,9 +3,11 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
+from scipy import stats
 
 import config
 from pipeline import signatures as sig
+from pipeline.cohort_stats import adjust_pvalues
 from viz_style import apply_style
 
 apply_style()
@@ -183,12 +185,37 @@ def plot_signature(ph, ctx, gsea_dir=None, fig_dir=None, themes=None, save=True)
 
 
 # ── gene_selection plots ────────────────────────────────────────────────────
-def plot_zscore_outlier_hist(Z_dis, dis_pheno, thresh=None, fig_dir=None, save=True):
-    thresh = MP['z_flag'] if thresh is None else thresh
+def _fdr_sig_count_per_sample(Z, padj_thr, fdr_method):
+    """Per-sample count of genes with adjusted padj/qval < padj_thr, treating each gene's z
+    as a per-sample z-test (p = 2*(1-Phi(|z|))). fdr_method: 'fdr_bh' (default), 'fdr_by',
+    'storey', or anything cohort_stats.adjust_pvalues accepts. Correction is applied
+    per-sample row (each sample is its own multiple-testing family)."""
+    pval = 2 * stats.norm.sf(np.abs(Z))
+    counts = np.empty(Z.shape[0], dtype=int)
+    for i in range(Z.shape[0]):
+        padj = adjust_pvalues(pval[i], method=fdr_method)
+        counts[i] = (padj < padj_thr).sum()
+    return counts
+
+
+def plot_zscore_outlier_hist(Z_dis, dis_pheno, route=None, padj_thr=0.05, fdr_method='fdr_bh',
+                             fig_dir=None, save=True):
+    """Per-phenotype distribution of the per-sample count of FDR-significant genes
+    (padj/qval < padj_thr), replacing the old raw |z|>thresh count. fdr_method: 'fdr_bh'
+    (default, comparable to DESeq2 padj), 'fdr_by' (valid under arbitrary dependence,
+    more conservative), or 'storey' (estimates the true-null fraction from the data instead
+    of assuming the worst case -- less conservative, but not directly comparable to a
+    BH-based reference like DESeq2 padj). route, if given (aligned to Z_dis columns, e.g.
+    scoring.gene_stage(dd.gene_names)), excludes pool-route ("rare") genes from the count --
+    they share a single fitted beta across genes and are not independent per-gene
+    hypotheses, so mixing them into this FDR count would be invalid (see cohort_stats.py for
+    the full rationale). Without route, all genes are counted."""
     fig_dir = fig_dir or config.CV_FIG_DIR
     fig_dir.mkdir(parents=True, exist_ok=True)
+    Z = Z_dis if route is None else Z_dis[:, np.asarray(route) != 'pool']
     pheno_list = np.unique(dis_pheno)
-    counts = {ph: (np.abs(Z_dis[dis_pheno == ph]) > thresh).sum(axis=1) for ph in pheno_list}
+    counts = {ph: _fdr_sig_count_per_sample(Z[dis_pheno == ph], padj_thr, fdr_method)
+             for ph in pheno_list}
     order = sorted(pheno_list, key=lambda ph: -np.median(counts[ph]))
     n_pheno = len(order); n_cols = 4; n_rows = (n_pheno + n_cols - 1) // n_cols
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 3 * n_rows))
@@ -199,11 +226,11 @@ def plot_zscore_outlier_hist(Z_dis, dis_pheno, thresh=None, fig_dir=None, save=T
         ax.axvline(np.median(c), color='tomato', linestyle='--', linewidth=1.0,
                    label=f'med={np.median(c):.0f}')
         ax.set_title(f'{ph} (n={len(c)})')
-        ax.set_xlabel(f'# genes |Z|>{thresh}'); ax.set_ylabel('samples')
+        ax.set_xlabel(f'# genes {fdr_method}<{padj_thr}'); ax.set_ylabel('samples')
         ax.legend(frameon=False)
     for ax in axes[n_pheno:]:
         ax.set_visible(False)
-    fig.suptitle(f'Per-phenotype distribution of |Z| > {thresh} gene count', y=1.01)
+    fig.suptitle(f'Per-phenotype distribution of FDR-significant ({fdr_method}<{padj_thr}) gene count', y=1.01)
     plt.tight_layout()
     if save:
         plt.savefig(fig_dir / 'zscore_outlier_gene_dist.png', bbox_inches='tight')
@@ -333,14 +360,97 @@ def _stage_of(df):
     return df['score_type'].map(_SCORE_TYPE_TO_STAGE).fillna('nbi')
 
 
-def plot_sample(df, sample_id, phenotype='', top_n=20, z_flag=None):
-    z_flag = MP['z_flag'] if z_flag is None else z_flag
+MODEL_STAGES = ('nbi', 'nb_fixed', 'intercept')
+
+
+def _model_padj_cutoff(model_df, padj_thr, fdr_method='fdr_bh'):
+    """Smallest |z| among model-route genes with adjusted padj/qval < padj_thr, treating each
+    gene's own score as a per-sample z-test (p = 2*(1-Phi(|z|))). None if nothing passes.
+    fdr_method: 'fdr_bh' (default), 'fdr_by', 'storey', or anything cohort_stats.adjust_pvalues
+    accepts. Only meaningful for model-route genes -- pool-route genes share a single fitted
+    beta across genes, so their |z| is not an independent per-gene test statistic (see
+    cohort_stats.py); they are never given a significance cutoff, only shown descriptively."""
+    if len(model_df) == 0:
+        return None
+    pval = 2 * stats.norm.sf(model_df['abs_score'].values)
+    padj = adjust_pvalues(pval, method=fdr_method)
+    passing = model_df['abs_score'].values[padj < padj_thr]
+    return passing.min() if len(passing) else None
+
+
+def _top_flagged_panel(ax, top, title, cutoff=None):
+    if len(top) == 0:
+        ax.text(0.5, 0.5, 'No flagged genes', ha='center', va='center',
+                transform=ax.transAxes, color='grey')
+        ax.axis('off')
+        return
+    colors = [_SCORE_STAGE_COLOR.get(s, 'grey') for s in top['stage']]
+    ax.barh(range(len(top)), top['abs_score'].values, color=colors, alpha=0.8, edgecolor='white')
+    ax.set_yticks(range(len(top)))
+    ax.set_yticklabels([f"{g}  ({c:.0f}ct)" for g, c in
+                        zip(top['label'], top['raw_count'].fillna(0))], fontsize=7)
+    ax.invert_yaxis()
+    if cutoff is not None:
+        ax.axvline(cutoff, color='red', lw=1, ls='--', alpha=0.6)
+    ax.set_xlabel('|Score|')
+    ax.set_title(title, fontweight='bold')
+    seen = [s for s in MODEL_STAGES if s in set(top['stage'])]
+    legend_els = [Patch(facecolor=_SCORE_STAGE_COLOR[s], label=_SCORE_STAGE_LABEL[s]) for s in seen]
+    ax.legend(handles=legend_els, fontsize=7, loc='lower right')
+
+
+def _rare_heatmap_panel(ax, rare_df, max_labels=40):
+    """Heatmap of ALL pool-route ("rare") genes by |z| -- descriptive only, no significance
+    cutoff, since these genes don't carry an independent per-gene test statistic (shared
+    fitted beta across the pool). See cohort_stats.py for the rationale. With many genes,
+    only max_labels evenly-spaced rows get a gene-name ytick to stay legible."""
+    top = rare_df.sort_values('abs_score', ascending=False).reset_index(drop=True)
+    n = len(top)
+    if n == 0:
+        ax.text(0.5, 0.5, 'No pool-route genes', ha='center', va='center',
+                transform=ax.transAxes, color='grey')
+        ax.axis('off')
+        return
+    vmax = max(top['abs_score'].max(), 1e-6)
+    im = ax.imshow(top['score'].values.reshape(-1, 1), cmap='RdBu_r', vmin=-vmax, vmax=vmax,
+                   aspect='auto')
+    ax.set_xticks([])
+    ticks = range(n) if n <= max_labels else np.linspace(0, n - 1, max_labels).round().astype(int)
+    ax.set_yticks(ticks)
+    ax.set_yticklabels([f"{top['label'].iloc[i]}  ({top['raw_count'].fillna(0).iloc[i]:.0f}ct)"
+                        for i in ticks], fontsize=5)
+    ax.set_title(f'All {n} Pool-route Genes\n(rare, descriptive)', fontweight='bold')
+    cbar = plt.colorbar(im, ax=ax, fraction=0.08, pad=0.15)
+    cbar.set_label('z (rare_glm)', fontsize=7)
+    cbar.ax.tick_params(labelsize=6)
+
+
+def plot_sample(df, sample_id, phenotype='', top_n=20, padj_thr=0.05, fdr_method='fdr_bh'):
+    """Model-route genes are flagged by an adjusted padj<padj_thr cutoff on their own
+    per-sample z (nbi-based cutoff, computed only across nbi/nb_fixed/intercept genes).
+    fdr_method: 'fdr_bh' (default), 'fdr_by', 'storey', or anything
+    cohort_stats.adjust_pvalues accepts. Pool-route ("rare") genes are shown separately as a
+    small descriptive heatmap with no significance cutoff, since they share a single fitted
+    beta across genes rather than each having its own regression -- see cohort_stats.py for
+    the full rationale."""
     df = df.dropna(subset=['score']).copy()
     df['abs_score'] = df['score'].abs()
     df['stage'] = _stage_of(df)
+    if 'gene_sym' in df.columns:
+        same = df['gene_sym'].isna() | (df['gene_sym'] == df['gene'])
+        df['label'] = np.where(same, df['gene'], df['gene_sym'] + ' (' + df['gene'] + ')')
+    else:
+        df['label'] = df['gene']
     df_sorted = df.sort_values('score', ascending=False).reset_index(drop=True)
-    flagged = df[df['abs_score'] >= z_flag].sort_values('abs_score', ascending=False)
-    fig, axes = plt.subplots(1, 2, figsize=(18, 5), gridspec_kw={'width_ratios': [3, 1]})
+    model_mask = df_sorted['stage'].isin(MODEL_STAGES)
+    model_df = df_sorted[model_mask]
+    rare_df = df_sorted[df_sorted['stage'] == 'pool']
+    z_cut = _model_padj_cutoff(model_df, padj_thr, fdr_method=fdr_method)
+    if z_cut is None:
+        z_cut = MP['z_flag']
+
+    fig_h = max(5, min(0.08 * len(rare_df), 30))
+    fig, axes = plt.subplots(1, 3, figsize=(22, fig_h), gridspec_kw={'width_ratios': [3, 1, 1]})
 
     ax = axes[0]
     for stage in ['nbi', 'nb_fixed', 'intercept', 'pool']:
@@ -349,38 +459,23 @@ def plot_sample(df, sample_id, phenotype='', top_n=20, z_flag=None):
             continue
         ax.scatter(sub.index, sub['score'], s=0.2, alpha=0.25, color=_SCORE_STAGE_COLOR[stage],
                    label=f'{_SCORE_STAGE_LABEL[stage]} (n={len(sub):,})', rasterized=True)
-    flag_sub = df_sorted[df_sorted['abs_score'] >= z_flag]
+    flag_sub = model_df[model_df['abs_score'] >= z_cut]
     ax.scatter(flag_sub.index, flag_sub['score'], s=5, color='black', zorder=5, alpha=0.8)
     for _, row in flag_sub.head(5).iterrows():
-        ax.annotate(row['gene'], (row.name, row['score']), xytext=(5, 3),
+        ax.annotate(row['label'], (row.name, row['score']), xytext=(5, 3),
                     textcoords='offset points', fontsize=7, alpha=0.85)
-    ax.axhline(z_flag, color='red', lw=1, ls='--', alpha=0.6, label=f'|z|={z_flag}')
-    ax.axhline(-z_flag, color='red', lw=1, ls='--', alpha=0.6)
+    ax.axhline(z_cut, color='red', lw=1, ls='--', alpha=0.6,
+              label=f'{fdr_method}<{padj_thr} (nbi-based)')
+    ax.axhline(-z_cut, color='red', lw=1, ls='--', alpha=0.6)
     ax.axhline(0, color='grey', lw=0.8, ls='-', alpha=0.4)
     ax.set_xlabel('Genes (sorted by score)')
     ax.set_ylabel('Anomaly Score (z / rare_score)')
     ax.set_title(f'{sample_id}\n{phenotype}', fontweight='bold')
     ax.legend(fontsize=8, loc='upper right', markerscale=8)
 
-    ax2 = axes[1]
-    top = flagged.head(top_n)
-    if len(top) == 0:
-        ax2.text(0.5, 0.5, 'No flagged genes', ha='center', va='center',
-                 transform=ax2.transAxes, color='grey')
-        ax2.axis('off')
-    else:
-        colors = [_SCORE_STAGE_COLOR.get(s, 'grey') for s in top['stage']]
-        ax2.barh(range(len(top)), top['abs_score'].values, color=colors, alpha=0.8, edgecolor='white')
-        ax2.set_yticks(range(len(top)))
-        ax2.set_yticklabels([f"{g}  ({c:.0f}ct)" for g, c in
-                             zip(top['gene'], top['raw_count'].fillna(0))], fontsize=7)
-        ax2.invert_yaxis()
-        ax2.axvline(z_flag, color='red', lw=1, ls='--', alpha=0.6)
-        ax2.set_xlabel('|Score|')
-        ax2.set_title(f'Top {len(top)} Flagged Genes', fontweight='bold')
-        seen = [s for s in ['nbi', 'nb_fixed', 'intercept', 'pool'] if s in set(top['stage'])]
-        legend_els = [Patch(facecolor=_SCORE_STAGE_COLOR[s], label=_SCORE_STAGE_LABEL[s]) for s in seen]
-        ax2.legend(handles=legend_els, fontsize=7, loc='lower right')
+    _top_flagged_panel(axes[1], flag_sub.sort_values('abs_score', ascending=False).head(top_n),
+                       f'Top {top_n} Flagged Genes\n(model route)', cutoff=z_cut)
+    _rare_heatmap_panel(axes[2], rare_df)
     plt.tight_layout()
     return fig
 

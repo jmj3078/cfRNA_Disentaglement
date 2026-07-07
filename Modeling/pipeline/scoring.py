@@ -22,12 +22,14 @@ def load_engine(h5ad_path=None, engine_dir=None):
     return engine
 
 
-def _scores_long(engine, gene_names, Z_all, Y_dis, sa_arr, ph_arr, min_abs_score):
+def _scores_long(engine, gene_names, Z_all, Y_dis, sa_arr, ph_arr, min_abs_score, gene_syms=None):
     """Unified long-format flagged table across all routes/stages.
 
     Built from the full Z (combined_all, rare/pool included). NaN cells (unfitted genes)
     are never flagged since NaN >= thr is False. `branch` = pool->'rare' else 'count'
     (historical parquet contract); `score_type` carries the fine-grained stage/route.
+    `gene_syms`, if given, must align with gene_names (same order) -- adds a `gene_sym`
+    column (falls back to the ENSG id for genes without a mapped symbol).
     """
     g_arr = np.array(gene_names)
     recs = [engine.genes.get(g) for g in g_arr]
@@ -37,10 +39,14 @@ def _scores_long(engine, gene_names, Z_all, Y_dis, sa_arr, ph_arr, min_abs_score
         for r in recs])
     mask = np.abs(Z_all) >= min_abs_score if min_abs_score > 0 else np.isfinite(Z_all)
     row_s, row_g = np.nonzero(mask)
-    return pd.DataFrame({
+    df = pd.DataFrame({
         'sample': sa_arr[row_s], 'phenotype': ph_arr[row_s], 'gene': g_arr[row_g],
         'score': Z_all[row_s, row_g].astype(float), 'score_type': stype_of[row_g],
         'raw_count': Y_dis[row_s, row_g].astype(float), 'branch': branch_of[row_g]})
+    if gene_syms is not None:
+        sym_arr = pd.Series(gene_syms, index=g_arr).fillna(pd.Series(g_arr, index=g_arr))
+        df['gene_sym'] = sym_arr.loc[g_arr[row_g]].values
+    return df
 
 
 def _save_rare(result, gene_names, z_rare_path, gene_names_path):
@@ -56,21 +62,26 @@ def _save_rare(result, gene_names, z_rare_path, gene_names_path):
     return Z_rare, rare_genes
 
 
-def score_all(engine, gene_names, X_dis, Y_dis, sample_names, pheno_names, min_abs_score=3.0):
+def score_all(engine, gene_names, X_dis, Y_dis, sample_names, pheno_names, min_abs_score=3.0,
+             gene_syms=None):
     """Long-format anomaly scores across all routes/stages (count/rare) for a few
-    samples. In-memory only -- used by the single-sample inspection notebook."""
+    samples. In-memory only -- used by the single-sample inspection notebook.
+    gene_syms (aligned to gene_names, e.g. dd.gene_syms) adds a gene_sym column."""
     result = engine.score(X_dis, Y_dis, gene_names=gene_names, seed=42, as_dict=True)
     return _scores_long(engine, list(result['gene_names']), result['combined_all'], Y_dis,
-                        np.array(sample_names), np.array(pheno_names), min_abs_score)
+                        np.array(sample_names), np.array(pheno_names), min_abs_score,
+                        gene_syms=gene_syms)
 
 
-def score_full(engine, gene_names, X_dis, Y_dis, dis_names, dis_pheno, thr=None, save=True):
+def score_full(engine, gene_names, X_dis, Y_dis, dis_names, dis_pheno, thr=None, save=True,
+              gene_syms=None):
     """Score all disease samples.
 
     Saves the canonical engine-only Z matrix (Z_disease.npy, rare columns zeroed -- the
     historical placeholder contract, preserved so existing downstream is untouched), the
     unified rare artifact (Z_rare_disease.npy), and the long-format flagged parquet (all
     branches, rare scored by the pooled covariate GLM). Returns (Z_combined, Z_rare, df).
+    gene_syms (aligned to gene_names, e.g. dd.gene_syms) adds a gene_sym column to the parquet.
     """
     thr = MP['z_flag'] if thr is None else thr
     t0 = time.perf_counter()
@@ -79,7 +90,7 @@ def score_full(engine, gene_names, X_dis, Y_dis, dis_names, dis_pheno, thr=None,
     print(f'Z matrix: {Z_combined.shape}  ({time.perf_counter()-t0:.1f}s)')
 
     df = _scores_long(engine, list(result['gene_names']), result['combined_all'], Y_dis,
-                      np.array(dis_names), np.array(dis_pheno), thr)
+                      np.array(dis_names), np.array(dis_pheno), thr, gene_syms=gene_syms)
     if save:
         config.Z_SCORES_DIR.mkdir(parents=True, exist_ok=True)
         np.save(config.Z_DISEASE, Z_combined)
