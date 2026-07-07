@@ -24,9 +24,9 @@ def _load_dir(d):
 
 def load_sets():
     """FDR-filtered term-set dicts keyed by canonical phenotype name.
-    Returns (no_filter, with_rare, deseq2, deseq2_cov). deseq2_cov is empty
+    Returns (only_nbi, with_rare, deseq2, deseq2_cov). deseq2_cov is empty
     until run_deseq2_covariate.py has been run."""
-    return (_load_dir(config.GSEA_DIR / 'no_filter'),
+    return (_load_dir(config.GSEA_DIR / 'only_nbi'),
             _load_dir(config.GSEA_DIR / 'with_rare'),
             _load_dir(config.DESEQ2_GSEA_DIR),
             _load_dir(config.DESEQ2_COV_GSEA_DIR))
@@ -73,8 +73,8 @@ def diff_terms(a_df, b_df, which):
 
 
 COMPARISONS = {
-    'rare_vs_norare': ('no_filter', 'with_rare'),
-    'deseq2_vs_norare': ('deseq2', 'no_filter'),
+    'norare_vs_with_rare': ('only_nbi', 'with_rare'),
+    'deseq2_vs_norare': ('deseq2', 'only_nbi'),
     'deseq2_vs_withrare': ('deseq2', 'with_rare'),
 }
 
@@ -83,7 +83,7 @@ def compare_all(save=True):
     """Per-disease term-overlap stats for all three comparisons + per-disease diff term
     lists. Returns (stats_df, diffs) where diffs[comparison][phenotype][which] = frame."""
     nf, wr, dq, _ = load_sets()
-    src = {'no_filter': nf, 'with_rare': wr, 'deseq2': dq}
+    src = {'only_nbi': nf, 'with_rare': wr, 'deseq2': dq}
     rows, diffs = [], {}
     for name, (lkey, rkey) in COMPARISONS.items():
         L, R = src[lkey], src[rkey]
@@ -145,11 +145,11 @@ def deseq2_coverage(save=True):
     """For each phenotype, how well DESeq2-rank GSEA recovers the DB-supported significant
     pathways that the normative model finds. A normative term is db_supported if its lead
     genes intersect the Open Targets reference; captured if DESeq2 also calls it significant.
-    Computed against both normative variants (no_filter, with_rare). Returns a stats frame."""
+    Computed against both normative variants (only_nbi, with_rare). Returns a stats frame."""
     nf, wr, dq, _ = load_sets()
     ref = load_reference()
     rows = []
-    for nkey, norm in [('no_filter', nf), ('with_rare', wr)]:
+    for nkey, norm in [('only_nbi', nf), ('with_rare', wr)]:
         for ph in sorted(set(dq) & set(norm)):
             dref = ref.get(ph, set())
             nl = _term_leads(norm[ph])
@@ -205,7 +205,7 @@ def deseq2_cov_vs_nocov(save=True):
 
 
 def db_hit_rates(save=True):
-    """Symmetric DB-support comparison across methods. For EACH method (deseq2 / no_filter /
+    """Symmetric DB-support comparison across methods. For EACH method (deseq2 / only_nbi /
     with_rare) and phenotype, the fraction of its OWN FDR-significant terms whose lead genes
     intersect the Open Targets reference (db_hit_rate = n_db / n_sig), plus absolute counts.
 
@@ -216,7 +216,7 @@ def db_hit_rates(save=True):
     a reference (pooled_db_hit_rate = total_db / total_sig, plus the per-phenotype mean)."""
     nf, wr, dq, dq_cov = load_sets()
     ref = load_reference()
-    methods = {'deseq2': dq, 'no_filter': nf, 'with_rare': wr}
+    methods = {'deseq2': dq, 'only_nbi': nf, 'with_rare': wr}
     if dq_cov:
         methods['deseq2_cov'] = dq_cov
     rows = []
@@ -257,7 +257,7 @@ def validate_rare_novel(diffs, save=True):
     ref = load_reference()
     rare_syms = rare_gene_symbols()
     rows = []
-    for ph, d in diffs['rare_vs_norare'].items():
+    for ph, d in diffs['norare_vs_with_rare'].items():
         dref = ref.get(ph, set())
         for _, r in d['right_only'].iterrows():
             lead = _leads(r.get('Lead_genes'))

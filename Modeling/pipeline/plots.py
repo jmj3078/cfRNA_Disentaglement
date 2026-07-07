@@ -576,8 +576,8 @@ def plot_venn_gsea_pathways(wr, dq, dq_cov, ncols=3, fig_dir=None, save=True):
 
 DB_METHOD_STYLE = {'deseq2': ('#DD8452', 'DESeq2'),
                    'deseq2_cov': ('#C44E52', 'DESeq2 + covariates'),
-                   'no_filter': ('#4C72B0', 'Normative (no_filter)'),
-                   'with_rare': ('#55A868', 'Normative (with_rare)')}
+                   'only_nbi': ('#4C72B0', 'Normative (no rare pooling)'),
+                   'with_rare': ('#55A868', 'Normative (with rare pooling)')}
 
 
 def plot_db_hit_rates(rates, summary, fig_dir=None, save=True):
