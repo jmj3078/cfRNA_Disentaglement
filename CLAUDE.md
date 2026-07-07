@@ -39,15 +39,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - `run_model_engine.py` : 엔진 학습 → `engine_state/`. demotion 통계+funnel figure. `--limit N`(smoke test) · `--nz-a-max`
   - `cv_model_engine.py` : 엔진 5-fold CV → `CV_Results/`
   - `sample_filter.py` : MahalanobisFilter OOD 필터
-  - `gene_selectors.py` : proportion/effect_size/svd + effect_size_specific(방안1 질병간대조+방안2 ubiquity damping) + l1_logistic(OVR L1 판별)
+  - `gene_selectors.py` : `GeneSelector.mean_z_ranking`(GSEA prerank 입력용 per-pheno mean-Z 랭킹) + compute_ubiquity만 유지. 분류기 계열 selector(proportion/effect_size/svd/effect_size_specific/l1_logistic)와 discrimination-control 평가는 재설계 위해 제거됨(git 이력에 백업)
   - `build_disease_reference.py` : Open Targets 질병별 참조 유전자 JSON 재생성
-  - `pipeline/` : 실제 분석·시각화 로직 패키지 (노트북은 thin runner). `data_prep`(공통 전처리: load_adata/study-split/OOD·MIN_SAMPLES/Z 로드/EXCLUDED_GENES 제외) · `scoring` · `selection` · `enrichment` · `signatures`(THEMES+heuristic/emap 군집) · `cv_diagnostics`(엔진 CV calibration·PPC 시각화+요약 CSV) · `benchmark`(DESeq2 vs Normative 유전자 단위 비교) · `gsea_compare`(GSEA term-level 3자 비교: with_rare/no_filter/DESeq2 겹침·diff·Open Targets DB 교차검증) · `plots`
+  - `pipeline/` : 실제 분석·시각화 로직 패키지 (노트북은 thin runner). `data_prep`(공통 전처리: load_adata/study-split/OOD·MIN_SAMPLES/Z 로드/EXCLUDED_GENES 제외) · `scoring` · `enrichment` · `signatures`(THEMES+heuristic/emap 군집) · `cv_diagnostics`(엔진 CV calibration·PPC 시각화+요약 CSV) · `benchmark`(DESeq2 vs Normative 유전자 단위 비교) · `gsea_compare`(GSEA term-level 3자 비교: with_rare/no_filter/DESeq2 겹침·diff·Open Targets DB 교차검증) · `plots`. **`selection`(run_selection+discrimination_control)은 제거됨** — Z-score의 batch/공변량 분산 감소는 분류기 AUC가 아니라 Z에 대한 RDA 분산분해로 검증하도록 재설계 중(신규 모듈 예정)
   - `engine_state/` : 학습된 엔진 산출물. genes.pkl(GeneRecord dict) · scaler.pkl · config.pkl · rare_glm.pkl(pooled rare GLM 계수) · training_summary.csv(route/stage/nz/fail_reason) · dispersion_trend.json · route_demotion_summary.png
   - `Z_scores/` : Z-score 산출물. Z_disease/hc*.npy = engine-only canonical(pool 컬럼 0 placeholder) · Z_rare_*.npy = rare 공변량 GLM 별도 아티팩트 · disease_scores_flagged.parquet = 전 route 통합 long표(z_flag=3.0 이진 플래그)
-  - `CV_Results/` : cv_stats.csv(per-gene held-out calibration) · cv_zscores.pkl · cv_ppc.pkl · cv_summary_by_stage.csv · discrimination_summary/by_disease.csv(random/batch-null/disease AUC) · Figures/
+  - `CV_Results/` : cv_stats.csv(per-gene held-out calibration) · cv_zscores.pkl · cv_ppc.pkl · cv_summary_by_stage.csv · Figures/ (discrimination_*.csv 및 selector heatmap/umap figure는 제거됨)
   - `GSEA/` : 조건별 하위폴더(no_filter=nbi+nb_fixed+intercept, with_rare=nbi+pool, nbi_only=nbi만; scoring.stage_masked_z로 그 stage 외 유전자 열 0) 각 gsea_result_*.csv·Clusters/·Figures/ + Master_Report.md(해석 리포트) + Analysis_Provenance.md
   - `Benchmark/` : DESeq2 vs Normative 비교. deseq2_results/gsea(공변량미보정) · deseq2_covariate_results/gsea(공변량보정) · disease_reference/(Open Targets 상위 300 유전자 JSON) · gsea_compare/(overlap_stats·rare_novel_validated·deseq2_coverage·db_hit_rates 등) · DESeq2_vs_Normative_Report.md · Figures/
-  - 노트북(모두 thin runner) : disease_scoring(→Z_scores/) → gene_selection → gene_enrichment → gsea_heuristic_signatures(PPT용) · model_diagnostics(cv_diagnostics.run_all) · gsea_rare_deseq2_comparison(gsea_compare 호출)
+  - 노트북(모두 thin runner) : disease_scoring(→Z_scores/) → gene_enrichment → gsea_heuristic_signatures(PPT용) · model_diagnostics(cv_diagnostics.run_all) · gsea_rare_deseq2_comparison(gsea_compare 호출). (gene_selection 노트북은 재설계 위해 제거됨)
 
 ### pipeline/ 주요 진입점 (노트북에서 실제 호출되는 함수)
 - `data_prep.load_disease_filtered()` → `DiseaseData` dataclass (Z_dis · dis_pheno · dis_names · gene_names · gene_syms · adata · is_hc · X_raw) 반환. 분석 노트북의 공통 진입점.
@@ -55,7 +55,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `scoring.load_engine()` → engine_state/가 있으면 NormativeModelEngine.load(), 없으면 학습 후 저장.
 - `scoring.score_full/score_hc(engine,...)` → `engine.score(..., as_dict=True)`로 canonical Z_scores/ 산출물 저장(Z_disease.npy=engine-only rare=0 placeholder · Z_rare_disease.npy · disease_scores_flagged.parquet).
 - `cv_diagnostics.run_all()` → CV_Results/의 cv_stats/cv_zscores/cv_ppc 읽어 calibration·PPC 그림+요약 CSV 산출.
-- `selection.discrimination_control(Z_dis,dis_pheno,Z_hc,hc_batch,gene_names)` → (summary_df, disease_df). healthy-null calibration control 대체(지도학습이 iid N(0,1)과의 미세상관을 miscalibration으로 오인하는 문제 때문). selector별 3종 held-out AUC: RANDOM split(HC 반분→pseudo-disease, batch 구조 파괴, ~0.5=위양성 없음) / BATCH-group split(batch 통째, batch-confound null) / DISEASE(질병별 vs HC, batch null 대비 z). `data_prep.hc_batch_ids(hc_names)`가 HC row에 정렬된 Batch_ID 제공. _gene_selection.ipynb 말미에서 호출. 결론: 엔진 HC calibration 무결함, 유일한 위양성원은 batch confound, 질병신호(median AUC~0.95)는 batch-null(~0.7~0.79) 초과([[project-hc-calibration-batch-confound]]).
+- **`selection.discrimination_control`(분류기 AUC 기반 batch-null/질병 판별)은 제거됨.** 폐기 사유: 서로 다른 분류 과제(random/batch/disease)의 AUC 크기를 비교해 "질병신호 > batch"를 주장하는 논리가 취약하고(AUC는 과제 간 비가산·비교불가), disease-vs-HC가 질병≈batch aliasing이면 배치효과와 분리되지 않으며, 애초에 group-wise 분류기로 검증하는 것 자체가 본 프레임의 개별-샘플 규범모델링 취지와 상충. 대체 방향: Z-score 행렬에 대한 partial RDA 분산분해로 batch/공변량 설명분산 감소·disease 설명분산 유지를 직접 정량화(EDA/analysis_helper.py의 `_run_partial_rda_core`/`analyze_partial_rda_per_study` 재사용). 분류기 지표는 이 검증 이후 활용성(utility) 평가로만 재도입 예정([[project-hc-calibration-batch-confound]]).
 - `disease_scores_flagged.parquet` (Z_scores/) → 샘플×유전자 Z-score를 z_flag(3.0) 기준으로 이진화한 플래그 표(branch=pool→rare else count, score_type=<stage>_z/rare_glm).
 
 ### 핵심 아키텍처 (여러 파일을 읽어야 파악되는 큰 그림)
@@ -70,7 +70,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Z-score = randomized quantile residual (RQR)**. HC 규범 분포가 맞으면 z ~ N(0,1). stage별 순수 파이썬 함수: nbi→`_nbi_rqr_from_coeffs`, nb_fixed/intercept→`_nb_rqr`, pool→`_poisson_rqr`/`_nb_rqr`(rare_z_cap=10 클립). scoring 시 R 불필요(stage nbi 학습 시에만 R 필요). `GeneRecord`가 gene마다 (initial_route, route, stage, 계수, fail_reason)을 보관해 `training_summary.csv`로 전체 demotion 이력 추적. `.branch` 프로퍼티(pool→'rare' else 'count')로 downstream taxonomy 제공.
 - **공변량(X) = BIAS_COLUMNS 10개**(config). HC로 fit한 StandardScaler로 표준화 후 모델 입력. disease 샘플은 학습된 scaler/계수로 score만.
 - **score()의 두 모드**: 기본은 bare Z 배열(CV용). `as_dict=True`면 downstream 계약 dict 반환(combined=pool열 0으로 zero한 engine-only · combined_all=전체 · rare/rare_gene_names=pool 서브행렬 · gene_names). scoring.py가 이걸로 canonical Z_scores/ 산출물 저장.
-- **데이터 흐름**: h5ad(config.H5AD_PATH=merged_qc) → 엔진 학습(engine_state/) → disease scoring(Z_scores/ 의 Z_disease.npy=engine-only canonical + Z_rare_disease.npy=rare 별도) → OOD(Mahalanobis, HC-fit) + MIN_SAMPLES 필터 + EXCLUDED_GENES 제외(data_prep.load_disease_filtered) → gene_selection/enrichment/GSEA/comparison. **EXCLUDED_GENES는 scoring이 아니라 downstream 진입점에서만 적용**(scoring은 전 유전자 저장).
+- **데이터 흐름**: h5ad(config.H5AD_PATH=merged_qc) → 엔진 학습(engine_state/) → disease scoring(Z_scores/ 의 Z_disease.npy=engine-only canonical + Z_rare_disease.npy=rare 별도) → OOD(Mahalanobis, HC-fit) + MIN_SAMPLES 필터 + EXCLUDED_GENES 제외(data_prep.load_disease_filtered) → enrichment/GSEA/comparison. **EXCLUDED_GENES는 scoring이 아니라 downstream 진입점에서만 적용**(scoring은 전 유전자 저장).
 - **rare 저장/사용은 통합 + opt-in**. canonical Z_disease.npy는 engine-only(pool 컬럼 0 placeholder) 유지로 기존 downstream 불변. rare(pool) 공변량 GLM z는 Z_rare_*.npy로 따로 저장되고, disease_scores_flagged.parquet에는 전 route 통합 long으로 들어감. GSEA/signature 등에서 rare를 합쳐 쓸지는 `scoring.score_disease_with_rare(dd)` / `scoring.load_z(with_rare=True)`로 분석 단계에서 선택(기본은 미포함).
 - **pipeline/ 패키지가 분석 로직, 노트북은 thin runner**. 같은 분석을 재현하려면 노트북이 아니라 pipeline 모듈을 수정. `pipeline/__init__.py`와 각 엔트리 스크립트가 자체적으로 root를 sys.path에 등록하므로 config/모듈 import는 재선언 없이 동작.
 - **v1(3-way detection-rate 분기 엔진)은 폐기 → `_legacy/Modeling_v1/`** (model_engine·run_model_engine·cv_gamlss_nb/zinb·cv_logistic·cv_rare·comparison.py·_model_validation.ipynb + engine_state/CV_Results/Z_scores 구 산출물). git branch가 실 백업.
@@ -79,7 +79,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **R 의존성**: 엔진 학습(run_model_engine.py의 stage nbi)과 cv_model_engine.py는 R + `gamlss` 패키지 + rpy2 필요(gamlss.r를 source). pool/nb_fixed/intercept 및 모든 scoring(RQR)은 순수 파이썬으로 R 불필요.
 - 엔진 학습 → engine_state/: `python Modeling/run_model_engine.py` (smoke test는 `--limit N`, 절대 실 산출물 덮어쓰지 말 것)
 - 엔진 CV → CV_Results/(cv_stats.csv · cv_zscores.pkl · cv_ppc.pkl): `python Modeling/cv_model_engine.py`
-- 분석 노트북 실행 순서(모두 thin runner): disease_scoring → gene_selection → gene_enrichment → gsea_heuristic_signatures, 그리고 model_diagnostics(엔진 CV calibration·PPC). EDA는 cwd=EDA 가정.
+- 분석 노트북 실행 순서(모두 thin runner): disease_scoring → gene_enrichment → gsea_heuristic_signatures, 그리고 model_diagnostics(엔진 CV calibration·PPC). EDA는 cwd=EDA 가정.
 - 테스트 스위트·린터·빌드 시스템 없음(연구 코드). 검증은 노트북 재실행/스크립트 산출물 확인으로 수행.
 
 ### 신규 분석 노트북 추가 시 체크리스트

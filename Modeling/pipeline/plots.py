@@ -346,51 +346,6 @@ def _curve_grid(curves, value_of, kind, color, label, suptitle, fname, fig_dir, 
         plt.savefig(fig_dir / fname, bbox_inches='tight', dpi=150)
     plt.show()
 
-def plot_selection_overview(method_name, all_results, Z_dis, dis_pheno, dis_names,
-                            gene_names, fig_dir=None, save=True):
-    """Save clustermap and UMAP for the selected gene set (heatmap_{m}.png, umap_{m}.png)."""
-    import seaborn as sns
-    from umap import UMAP
-    fig_dir = fig_dir or config.CV_FIG_DIR
-    fig_dir.mkdir(parents=True, exist_ok=True)
-    res = all_results[method_name]
-    g2i = {g: i for i, g in enumerate(gene_names)}
-    idx = [g2i[g] for g in res['genes'] if g in g2i]
-    X = Z_dis[:, idx]
-    unique_phenos = sorted(np.unique(dis_pheno))
-    p2c = dict(zip(unique_phenos, sns.color_palette('tab20', len(unique_phenos))))
-    rc = [p2c[p] for p in dis_pheno]
-
-    pivot = pd.DataFrame(X, index=dis_names, columns=res['genes'])
-    g = sns.clustermap(
-        pivot, method='ward', metric='euclidean',
-        row_colors=rc, col_cluster=True, row_cluster=True,
-        cmap='RdBu_r', vmin=-6, vmax=6, center=0,
-        xticklabels=False, yticklabels=False,
-        figsize=(20, 13), linewidths=0, rasterized=True,
-        cbar_kws=dict(label='Z-score', shrink=0.35, ticks=[-6, -3, 0, 3, 6]))
-    patches = [Patch(color=p2c[p], label=p) for p in unique_phenos]
-    g.ax_heatmap.legend(handles=patches, loc='upper left',
-                        bbox_to_anchor=(1.15, 0.7), frameon=False, title='Phenotype')
-    g.fig.suptitle(f'Heatmap — {method_name}  ({len(res["genes"])} genes)', y=1.01)
-    if save:
-        plt.savefig(fig_dir / f'heatmap_{method_name}.png', bbox_inches='tight', dpi=300)
-    plt.show()
-
-    emb = UMAP(n_components=2, metric='euclidean', n_neighbors=15,
-               min_dist=0.2, random_state=42).fit_transform(X)
-    fig, ax = plt.subplots(figsize=(9, 7))
-    for ph in unique_phenos:
-        m = dis_pheno == ph
-        ax.scatter(emb[m, 0], emb[m, 1], c=[p2c[ph]], s=12, alpha=0.75, label=ph, edgecolors='none')
-    ax.legend(frameon=False, bbox_to_anchor=(1.01, 1), loc='upper left', title='Phenotype')
-    ax.set(title=f'UMAP — {method_name}  ({len(res["genes"])} genes)', xlabel='UMAP 1', ylabel='UMAP 2')
-    plt.tight_layout()
-    if save:
-        plt.savefig(fig_dir / f'umap_{method_name}.png', bbox_inches='tight', dpi=300)
-    plt.show()
-
-
 # ── disease_scoring per-sample Manhattan (disease_scoring) ──────────────────
 # Fine-grained stage/route colouring. The flagged table's score_type
 # (nbi_z / nb_fixed_z / intercept_z / rare_glm) maps to the engine stage/route.
