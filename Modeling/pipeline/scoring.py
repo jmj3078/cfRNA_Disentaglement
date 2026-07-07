@@ -4,13 +4,15 @@ import numpy as np
 import pandas as pd
 
 import config
-from model_engine import NormativeModelEngine
 
 MP = config.MODELING_PARAMS
 
 
 def load_engine(h5ad_path=None, engine_dir=None):
-    """Load the saved engine, or train/build if absent."""
+    """Load the saved engine, or train/build if absent. Imports model_engine lazily (it
+    pulls in rpy2/R for stage nbi) so pure-Python consumers of this module -- e.g.
+    gene_stage(), used by notebooks that only need routing/stage metadata -- don't need R."""
+    from model_engine import NormativeModelEngine
     h5ad_path = h5ad_path or config.H5AD_PATH
     engine_dir = engine_dir or config.ENGINE_DIR
     if (engine_dir / 'genes.pkl').exists():

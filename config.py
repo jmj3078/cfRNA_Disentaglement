@@ -47,6 +47,10 @@ Z_RARE_HC         = Z_SCORES_DIR / "Z_rare_hc.npy"
 Z_RARE_GENE_NAMES = Z_SCORES_DIR / "Z_rare_gene_names.npy"
 RARE_GLM       = ENGINE_DIR / "rare_glm.pkl"
 
+COHORT_COMPARE_DIR     = MODELING_DIR / "Cohort_Compare"
+COHORT_COMPARE_GSEA_DIR = COHORT_COMPARE_DIR / "GSEA"
+COHORT_COMPARE_FIG_DIR  = COHORT_COMPARE_DIR / "Figures"
+
 BENCHMARK_DIR      = MODELING_DIR / "Benchmark"
 DESEQ2_RESULTS_DIR = BENCHMARK_DIR / "deseq2_results"
 DESEQ2_GSEA_DIR    = BENCHMARK_DIR / "deseq2_gsea"

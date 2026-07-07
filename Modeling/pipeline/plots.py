@@ -237,6 +237,52 @@ def plot_zscore_outlier_hist(Z_dis, dis_pheno, route=None, padj_thr=0.05, fdr_me
     plt.show()
 
 
+# ── cohort-vs-cohort DEG (cohort_compare) ───────────────────────────────────
+def plot_volcano(df, name, padj_thr=0.05, top_n_labels=15, fig_dir=None, save=True):
+    """Volcano plot for a cohort_compare.run_comparison() DEG table.
+
+    x = mean_diff: the difference in mean Z between the two cohorts. This is a standardized
+    deviation-scale effect size, NOT a log2 fold-change -- Z is already covariate-adjusted,
+    so magnitudes are comparable across samples for the same gene but are not on the same
+    scale as DESeq2 log2FC across genes with different baseline dispersion; read this plot
+    as "how many SD apart", not "how many fold different".
+    Pool-route genes (df['route']=='pool'), if present, are excluded -- they share a single
+    fitted beta across genes and aren't independent per-gene hypotheses (see cohort_stats.py).
+    Genes with NaN padj (independent-filtering excluded, cohort_compare's min_hc_dev) are
+    also dropped from the plot rather than shown as ns.
+    """
+    d = df[df['route'] != 'pool'].copy() if 'route' in df.columns else df.copy()
+    d = d.dropna(subset=['padj'])
+    d['neglog10_padj'] = -np.log10(d['padj'].clip(lower=1e-300))
+    sig = d['padj'] < padj_thr
+    up = sig & (d['mean_diff'] > 0)
+    down = sig & (d['mean_diff'] < 0)
+    fig, ax = plt.subplots(figsize=(7, 6))
+    ax.scatter(d.loc[~sig, 'mean_diff'], d.loc[~sig, 'neglog10_padj'], s=4, color='lightgrey',
+              alpha=0.5, label=f'ns (n={(~sig).sum():,})', rasterized=True)
+    ax.scatter(d.loc[up, 'mean_diff'], d.loc[up, 'neglog10_padj'], s=8, color=UP, alpha=0.8,
+              label=f'up (n={up.sum():,})')
+    ax.scatter(d.loc[down, 'mean_diff'], d.loc[down, 'neglog10_padj'], s=8, color=DN, alpha=0.8,
+              label=f'down (n={down.sum():,})')
+    top = d[sig].sort_values('padj').head(top_n_labels)
+    for _, row in top.iterrows():
+        ax.annotate(row['gene_sym'], (row['mean_diff'], row['neglog10_padj']), fontsize=7,
+                    xytext=(3, 3), textcoords='offset points')
+    ax.axhline(-np.log10(padj_thr), color='grey', lw=0.8, ls='--')
+    ax.axvline(0, color='grey', lw=0.6)
+    ax.set_xlabel('Mean Z difference (cohort A - cohort B)')
+    ax.set_ylabel('-log10(padj)')
+    ax.set_title(name, fontweight='bold')
+    ax.legend(frameon=False, fontsize=8)
+    plt.tight_layout()
+    if save:
+        fig_dir = fig_dir or config.COHORT_COMPARE_FIG_DIR
+        fig_dir.mkdir(parents=True, exist_ok=True)
+        plt.savefig(fig_dir / f'volcano_{name}.png', dpi=300, bbox_inches='tight')
+    plt.show()
+    return fig
+
+
 def _roc_shadow(ax, roc_d, color, label, auc, lw=1.5, alpha=0.18):
     if not roc_d or not roc_d.get('fprs'):
         ax.text(0.5, 0.5, 'N/A', ha='center', va='center', transform=ax.transAxes, color='grey')
