@@ -69,12 +69,6 @@ def z_stats(z):
 
 
 def fold_summary(fold_info, n_splits):
-    """Aggregates per-fold dicts (success/fail_reason/n_removed) into gene-level
-    columns. n_folds_ok distinguishes 'demoted to a worse-calibrated but still
-    fitted stage' from 'fold silently produced nothing' -- both look identical
-    in the pooled z_stats() (n_valid just drops), so without this a gene with
-    2/5 folds failing outright is indistinguishable from one with 5/5 folds
-    each contributing fewer usable held-out points."""
     n_ok = sum(1 for f in fold_info if f["success"])
     removed = [f["n_removed"] for f in fold_info if f["success"]]
     reasons = sorted({f["fail_reason"] for f in fold_info if not f["success"] and f["fail_reason"]})
@@ -88,14 +82,6 @@ def fold_summary(fold_info, n_splits):
 
 
 def cv_pool(y, Xs, folds, mean_hc_full, rare_glm_full, seed):
-    """Held-out z for a single route "pool" (rare-pooled) gene, refitting the
-    shared pooled beta per fold is out of scope here -- reuse the full-data
-    pooled GLM (consistent with 'route decided from full data' but scored on
-    held-out y). No per-fold fitting or outlier removal happens for pool, so
-    fold_info is trivially all-success/zero-removed for schema consistency
-    with the other three cv_* functions. Also returns per-held-out-point
-    mu/sigma so a posterior predictive check can simulate y ~ fitted(mu,sigma)
-    and compare to the actual held-out y, not just its z-score."""
     n = len(y)
     z = np.full(n, np.nan)
     mu_all = np.full(n, np.nan)
@@ -118,14 +104,6 @@ def cv_pool(y, Xs, folds, mean_hc_full, rare_glm_full, seed):
 
 def cv_nb_fixed(y, Xs, folds, alpha_fn, outlier_z, max_iter, max_remove_frac, seed,
                 beta_explode_thr=None, gaic_k=None):
-    """Re-fits stage nb_fixed (full-vs-intercept GAIC comparison) per fold,
-    falling through to fit_intercept_only_gene if the full IRLS diverges.
-    Returns (z, fold_info, mu_all, sigma_all) -- fold_info is one dict per fold
-    for CV-level diagnostics (success, fail_reason, n_removed, chosen), since a
-    gene's aggregate calibration stats alone hide whether e.g. only 2/5 folds
-    actually produced a usable fit. mu_all/sigma_all hold the fitted mean/
-    dispersion at each held-out point (for posterior predictive checks),
-    including the fallback-intercept case."""
     n = len(y)
     z = np.full(n, np.nan)
     mu_all = np.full(n, np.nan)
@@ -158,10 +136,6 @@ def cv_nb_fixed(y, Xs, folds, alpha_fn, outlier_z, max_iter, max_remove_frac, se
 
 
 def cv_intercept(y, alpha_fn, folds, seed):
-    """Re-evaluates genes whose final stage IS "intercept"
-    (stage == 'intercept' in training_summary.csv): closed-form,
-    per fold, mirroring fit_intercept_only_gene exactly. Returns (z, fold_info,
-    mu_all, sigma_all)."""
     n = len(y)
     z = np.full(n, np.nan)
     mu_all = np.full(n, np.nan)
@@ -182,13 +156,6 @@ def cv_intercept(y, alpha_fn, folds, seed):
 
 def cv_nbi(y, Xs, folds, r_fit_fn, col_names, outlier_z, max_iter, max_remove_frac,
           lambda_sigma, seed):
-    """Returns (z, fold_info). Each fold's R gamlss call reports success/msg/
-    n_removed even on failure (na_result in gamlss.r), so a bare except only
-    fires for genuinely unexpected rpy2/R-session errors -- those are recorded
-    with fail_reason='py_exception:<msg>' rather than silently dropped, so an
-    all-NaN gene (n_valid=0) is now traceable to a specific per-fold cause.
-    Also captures mu_test/sigma_test (already computed by fit_gamlss_gene but
-    previously discarded) for posterior predictive checks."""
     n = len(y)
     z = np.full(n, np.nan)
     mu_all = np.full(n, np.nan)
@@ -232,10 +199,6 @@ def main():
     summary = summary[summary["attempted"] & (summary["route"] != "excluded")]
     if args.limit:
         summary = summary.iloc[:args.limit]
-
-    # Use the parameters the engine actually trained with (config.pkl), NOT the
-    # current config.MODELING_PARAMS -- config.py may have changed since training,
-    # and CV must re-evaluate under the same settings that produced the routes.
     with open(config.ENGINE_DIR / "config.pkl", "rb") as f:
         engine_cfg = pickle.load(f)
     print(f"  engine config: {engine_cfg}")
@@ -287,9 +250,6 @@ def main():
         else:
             continue
         zdict[gene] = z.astype(np.float32)
-        # y_hc stored alongside mu/sigma so a posterior predictive check (simulate
-        # y ~ fitted(mu, sigma) per held-out point and compare to actual y) doesn't
-        # need to re-load the full h5ad -- mirrors cv_gamlss_nb.py's ppc_dict.
         ppc_dict[gene] = dict(y=y.astype(np.float32), mu=mu_all.astype(np.float32),
                               sigma=sigma_all.astype(np.float32), family=family, stage=stage or route)
         st = z_stats(z)

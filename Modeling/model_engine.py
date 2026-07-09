@@ -126,7 +126,10 @@ def _nb_irls(y, X, alpha, max_iter=100, tol=1e-8):
             beta = beta_new
             return beta, True
         beta = beta_new
-    return beta, True
+    # Loop exhausted without meeting tol: report honest non-convergence rather
+    # than claiming success, mirroring the stage-nbi convergence gate. The
+    # caller (fit_route_b_gene) demotes this to the closed-form intercept stage.
+    return beta, False
 
 
 def _nb_deviance(y, mu, alpha):
@@ -186,7 +189,7 @@ def fit_route_b_gene(y_train, X_train, alpha_fn, outlier_z, max_iter, max_remove
         alpha_g = alpha_fn(float(y_k.mean()))
         beta, ok = _nb_irls(y_k, X_k, alpha_g)
         if not ok or not np.all(np.isfinite(beta)):
-            return dict(success=False, fail_reason="irls_diverged", n_removed=n_removed)
+            return dict(success=False, fail_reason="irls_not_converged", n_removed=n_removed)
         mu_k = np.clip(np.exp(X_k @ beta), 1e-6, 1e8)
         z_k = _nb_rqr(y_k, mu_k, alpha_g, seed=0)
         drop_idx = _select_outliers(z_k, outlier_z, max_remove_frac, n, n_removed)
@@ -301,7 +304,6 @@ class NormativeModelEngine:
         self.rare_glm = None
 
         self._r_nbi_fn = None
-        self._r_nbi_null_fn = None
 
     # ---- Data loading -----------------------------------------------------
 
@@ -381,10 +383,13 @@ class NormativeModelEngine:
 
     def _fit_nbi(self, rec):
         """Try full NBI only -- no intercept-only competitor is fit here. Any
-        failure (R non-convergence, rpy2-level exception, or coefficient
-        explosion in mu or sigma) demotes straight to stage "nb_fixed", which
-        does its own full-vs-intercept GAIC comparison using the shared
-        fit_intercept_only_gene closed form. In-sample W1 is recorded
+        failure demotes straight to stage "nb_fixed", which does its own
+        full-vs-intercept GAIC comparison using the shared
+        fit_intercept_only_gene closed form. Failure covers: rpy2-level
+        exception, gamlss hard error (success=FALSE), gamlss non-convergence
+        (converged=FALSE -- gamlss reports this as a warning, not an error, so
+        it must be checked explicitly), non-finite mu/sigma coefficients, and
+        coefficient explosion in mu or sigma. In-sample W1 is recorded
         (w1_train) but does not itself gate acceptance -- see
         _record_calibration."""
         self._init_r()
@@ -402,6 +407,13 @@ class NormativeModelEngine:
 
         if not bool(res_full.rx2("success")[0]):
             rec.fail_reason = str(res_full.rx2("msg")[0]) or "nbi_full_not_converged"
+            return False
+
+        if not bool(res_full.rx2("converged")[0]):
+            rec.fail_reason = "nbi_not_converged"
+            return False
+        if not (bool(res_full.rx2("mu_finite")[0]) and bool(res_full.rx2("sigma_finite")[0])):
+            rec.fail_reason = "nbi_nonfinite_coef"
             return False
 
         beta_full = np.array(res_full.rx2("mu_coef"))
