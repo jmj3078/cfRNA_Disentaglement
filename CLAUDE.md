@@ -39,15 +39,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - `run_model_engine.py` : 엔진 학습 → `engine_state/`. demotion 통계+funnel figure. `--limit N`(smoke test) · `--nz-a-max`
   - `cv_model_engine.py` : 엔진 5-fold CV → `CV_Results/`
   - `sample_filter.py` : MahalanobisFilter OOD 필터
-  - `gene_selectors.py` : `GeneSelector.mean_z_ranking`(GSEA prerank 입력용 per-pheno mean-Z 랭킹) + compute_ubiquity만 유지. 분류기 계열 selector(proportion/effect_size/svd/effect_size_specific/l1_logistic)와 discrimination-control 평가는 재설계 위해 제거됨(git 이력에 백업)
+  - `gene_selectors.py` : `GeneSelector.mean_z_ranking`(GSEA prerank 입력용 per-pheno mean-Z 랭킹) + compute_ubiquity만 유지. 분류기 계열 selector(proportion/effect_size/svd/effect_size_specific/l1_logistic)와 discrimination-control 평가는 제거됨(git 이력에 백업) — 대체는 `pipeline/lobo_validation.py`(아래 참조)
   - `build_disease_reference.py` : Open Targets 질병별 참조 유전자 JSON 재생성
-  - `pipeline/` : 실제 분석·시각화 로직 패키지 (노트북은 thin runner). `data_prep`(공통 전처리: load_adata/study-split/OOD·MIN_SAMPLES/Z 로드/EXCLUDED_GENES 제외) · `scoring` · `enrichment` · `signatures`(THEMES+heuristic/emap 군집) · `cv_diagnostics`(엔진 CV calibration·PPC 시각화+요약 CSV) · `benchmark`(DESeq2 vs Normative 유전자 단위 비교) · `gsea_compare`(GSEA term-level 3자 비교: with_rare/no_filter/DESeq2 겹침·diff·Open Targets DB 교차검증) · `plots`. **`selection`(run_selection+discrimination_control)은 제거됨** — Z-score의 batch/공변량 분산 감소는 분류기 AUC가 아니라 Z에 대한 RDA 분산분해로 검증하도록 재설계 중(신규 모듈 예정)
+  - `run_lobo_validation.py` : HC가 1명 이상 존재하는 batch 전부(31개, Tier A=HC+disease 공존 22 · Tier B=HC-only 9; HC가 전혀 없는 disease-only batch는 LOBO 자체가 불가능해 대상 아님) 개별 leave-one-batch-out 재학습. 각 batch를 완전히 학습에서 제외한 뒤 그 batch의 held-out HC+disease를 함께 스코어링, `LOBO_Results/<batch_id>/`에 독립 저장(재현용). `--batch`(단일 배치) · `--limit-genes`(smoke test). meta.json 존재 시 자동 skip(중단 후 재실행 안전)
+  - `compute_lobo_ood.py` : LOBO 각 batch의 held-out 샘플에 MahalanobisFilter 적용(반드시 그 batch를 뺀 train-fold HC로 fit) → `ood_mask.npy`/`ood_distance.npy` 저장, 공변량 극단 이탈 샘플 사후 배제
+  - `pipeline/` : 실제 분석·시각화 로직 패키지 (노트북은 thin runner). `data_prep`(공통 전처리: load_adata/study-split/OOD·MIN_SAMPLES/Z 로드/EXCLUDED_GENES 제외) · `scoring` · `enrichment` · `signatures`(THEMES+heuristic/emap 군집) · `cv_diagnostics`(엔진 CV calibration·PPC 시각화+요약 CSV) · `benchmark`(DESeq2 vs Normative 유전자 단위 비교) · `gsea_compare`(GSEA term-level 3자 비교: with_rare/no_filter/DESeq2 겹침·diff·Open Targets DB 교차검증) · `lobo_validation`(discrimination_control 대체 — MMD 기반 LOBO batch-matched 검증, 아래 참조) · `plots`. **`selection`(run_selection+discrimination_control)은 제거됨**
   - `engine_state/` : 학습된 엔진 산출물. genes.pkl(GeneRecord dict) · scaler.pkl · config.pkl · rare_glm.pkl(pooled rare GLM 계수) · training_summary.csv(route/stage/nz/fail_reason) · dispersion_trend.json · route_demotion_summary.png
   - `Z_scores/` : Z-score 산출물. Z_disease/hc*.npy = engine-only canonical(pool 컬럼 0 placeholder) · Z_rare_*.npy = rare 공변량 GLM 별도 아티팩트 · disease_scores_flagged.parquet = 전 route 통합 long표(z_flag=3.0 이진 플래그)
   - `CV_Results/` : cv_stats.csv(per-gene held-out calibration) · cv_zscores.pkl · cv_ppc.pkl · cv_summary_by_stage.csv · Figures/ (discrimination_*.csv 및 selector heatmap/umap figure는 제거됨)
+  - `LOBO_Results/` : `<batch_id>/`별 Z_test.npy·gene_names.pkl·meta.json(batch_id/tier/n_hc_train/n_test/test_names/test_is_hc/engine_cfg)·fold_info.csv·ood_mask.npy · `batch_tier_assignment.csv`(Tier A=HC+disease 공존/B=disease-only) · `mmd_summary.csv`+`mmd_bar.png`+`mmd_direction.png`(pipeline.lobo_validation.run_all() 캐시 산출물)
   - `GSEA/` : 조건별 하위폴더(no_filter=nbi+nb_fixed+intercept, with_rare=nbi+pool, nbi_only=nbi만; scoring.stage_masked_z로 그 stage 외 유전자 열 0) 각 gsea_result_*.csv·Clusters/·Figures/ + Master_Report.md(해석 리포트) + Analysis_Provenance.md
   - `Benchmark/` : DESeq2 vs Normative 비교. deseq2_results/gsea(공변량미보정) · deseq2_covariate_results/gsea(공변량보정) · disease_reference/(Open Targets 상위 300 유전자 JSON) · gsea_compare/(overlap_stats·rare_novel_validated·deseq2_coverage·db_hit_rates 등) · DESeq2_vs_Normative_Report.md · Figures/
-  - 노트북(모두 thin runner) : disease_scoring(→Z_scores/) → gene_enrichment → gsea_heuristic_signatures(PPT용) · model_diagnostics(cv_diagnostics.run_all) · gsea_rare_deseq2_comparison(gsea_compare 호출). (gene_selection 노트북은 재설계 위해 제거됨)
+  - 노트북(모두 thin runner) : disease_scoring(→Z_scores/) → gene_enrichment → gsea_heuristic_signatures(PPT용) · model_diagnostics(cv_diagnostics.run_all) · gsea_rare_deseq2_comparison(gsea_compare 호출) · lobo_validation(pipeline.lobo_validation.run_all). (gene_selection 노트북은 재설계 위해 제거됨)
 
 ### pipeline/ 주요 진입점 (노트북에서 실제 호출되는 함수)
 - `data_prep.load_disease_filtered()` → `DiseaseData` dataclass (Z_dis · dis_pheno · dis_names · gene_names · gene_syms · adata · is_hc · X_raw) 반환. 분석 노트북의 공통 진입점.
@@ -55,7 +58,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `scoring.load_engine()` → engine_state/가 있으면 NormativeModelEngine.load(), 없으면 학습 후 저장.
 - `scoring.score_full/score_hc(engine,...)` → `engine.score(..., as_dict=True)`로 canonical Z_scores/ 산출물 저장(Z_disease.npy=engine-only rare=0 placeholder · Z_rare_disease.npy · disease_scores_flagged.parquet).
 - `cv_diagnostics.run_all()` → CV_Results/의 cv_stats/cv_zscores/cv_ppc 읽어 calibration·PPC 그림+요약 CSV 산출.
-- **`selection.discrimination_control`(분류기 AUC 기반 batch-null/질병 판별)은 제거됨.** 폐기 사유: 서로 다른 분류 과제(random/batch/disease)의 AUC 크기를 비교해 "질병신호 > batch"를 주장하는 논리가 취약하고(AUC는 과제 간 비가산·비교불가), disease-vs-HC가 질병≈batch aliasing이면 배치효과와 분리되지 않으며, 애초에 group-wise 분류기로 검증하는 것 자체가 본 프레임의 개별-샘플 규범모델링 취지와 상충. 대체 방향: Z-score 행렬에 대한 partial RDA 분산분해로 batch/공변량 설명분산 감소·disease 설명분산 유지를 직접 정량화(EDA/analysis_helper.py의 `_run_partial_rda_core`/`analyze_partial_rda_per_study` 재사용). 분류기 지표는 이 검증 이후 활용성(utility) 평가로만 재도입 예정([[project-hc-calibration-batch-confound]]).
+- **`selection.discrimination_control`(분류기 AUC 기반 batch-null/질병 판별)은 제거됨.** 폐기 사유: 서로 다른 분류 과제(random/batch/disease)의 AUC 크기를 비교해 "질병신호 > batch"를 주장하는 논리가 취약하고(AUC는 과제 간 비가산·비교불가), disease-vs-HC가 질병≈batch aliasing이면 배치효과와 분리되지 않으며, 애초에 group-wise 분류기로 검증하는 것 자체가 본 프레임의 개별-샘플 규범모델링 취지와 상충.
+- **대체: `pipeline.lobo_validation`(leave-one-batch-out + MMD)**. HC+disease가 같은 batch에 공존하는 Tier A batch를 통째로 학습에서 제외(재학습)한 뒤, held-out HC(모델이 못 본 새 batch 노이즈 바닥)와 동일 batch의 held-out disease를 동일 조건에서 스코어링해 batch 노출을 완전히 통제. 편차 지표는 mean|Z|/카이제곱 sum(z²)/BH-FDR 극단비율을 모두 시도 후 폐기(전유전자 스칼라 요약이 소수 유전자 신호를 희석, 22개 batch 중 유의 2~4개뿐) — **MMD(RBF kernel, 전유전자 직접 사용, permutation test)만 채택**. `pipeline.lobo_validation.MIN_N_HC`=25 미만(노이즈 바닥 추정 불안정) batch는 보고에서 제외. 결과(2026-07-08): n_hc≥25인 6 batch 중 5개(83%)에서 MMD 유의(p<0.05)+방향 일치(disease가 held-out HC보다 in-fold HC 기준점에서 더 멂); 예외 1개(Moore_Batch_1)는 phenotype별 분해로 실제 신호 약함을 확인(노이즈 바닥 불안정 아님). 상세: [[project_lobo_validation_design]]. 분류기 지표는 이 검증 이후 활용성(utility) 평가로만 재도입 예정.
 - `disease_scores_flagged.parquet` (Z_scores/) → 샘플×유전자 Z-score를 z_flag(3.0) 기준으로 이진화한 플래그 표(branch=pool→rare else count, score_type=<stage>_z/rare_glm).
 
 ### 핵심 아키텍처 (여러 파일을 읽어야 파악되는 큰 그림)
@@ -79,7 +83,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **R 의존성**: 엔진 학습(run_model_engine.py의 stage nbi)과 cv_model_engine.py는 R + `gamlss` 패키지 + rpy2 필요(gamlss.r를 source). pool/nb_fixed/intercept 및 모든 scoring(RQR)은 순수 파이썬으로 R 불필요.
 - 엔진 학습 → engine_state/: `python Modeling/run_model_engine.py` (smoke test는 `--limit N`, 절대 실 산출물 덮어쓰지 말 것)
 - 엔진 CV → CV_Results/(cv_stats.csv · cv_zscores.pkl · cv_ppc.pkl): `python Modeling/cv_model_engine.py`
-- 분석 노트북 실행 순서(모두 thin runner): disease_scoring → gene_enrichment → gsea_heuristic_signatures, 그리고 model_diagnostics(엔진 CV calibration·PPC). EDA는 cwd=EDA 가정.
+- LOBO 검증(batch당 nbi 단계 기준 약 15분, 31개 batch 전체 약 6~8시간, 이미 끝난 batch는 meta.json 존재시 자동 skip): `python Modeling/run_lobo_validation.py` → `python Modeling/compute_lobo_ood.py` → `pipeline.lobo_validation.run_all()`(캐시 우선, `_lobo_validation.ipynb`에서 호출)
+- 분석 노트북 실행 순서(모두 thin runner): disease_scoring → gene_enrichment → gsea_heuristic_signatures, 그리고 model_diagnostics(엔진 CV calibration·PPC), lobo_validation(MMD 기반 batch 검증). EDA는 cwd=EDA 가정.
 - 테스트 스위트·린터·빌드 시스템 없음(연구 코드). 검증은 노트북 재실행/스크립트 산출물 확인으로 수행.
 
 ### 신규 분석 노트북 추가 시 체크리스트
