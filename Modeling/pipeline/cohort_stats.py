@@ -66,7 +66,8 @@ def _test(Z, gene_names, ref=None, route=None, fdr_method='fdr_bh'):
         df = _fdr(df, fdr_method)
     else:
         df['route'] = np.asarray(route)
-        df = pd.concat([_fdr(g, fdr_method) for _, g in df.groupby('route', sort=False)])
+        strata = np.where(df['route'].values == 'pool', 'pool', 'model')
+        df = pd.concat([_fdr(g, fdr_method) for _, g in df.groupby(strata, sort=False)])
     return df.sort_values('pval').reset_index(drop=True)
 
 

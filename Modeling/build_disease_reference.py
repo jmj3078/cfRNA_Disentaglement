@@ -11,31 +11,23 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import config
 
 OPEN_TARGETS = "https://api.platform.opentargets.org/api/v4/graphql"
-TOP_N = 300
+PAGE_SIZE = 1000
 
-# phenotype (GSEA file stem) -> Open Targets disease search query.
-# Heterogeneous / undefined-cohort phenotypes map to None (no OT gene reference; literature-only).
+# Cancer phenotypes only (per project decision to focus this reference expansion on cancer
+# cohorts). ICI-treated Cancer maps to None -- heterogeneous cohort, no single OT disease ID,
+# excluded from analyses that require an OT reference gene set.
 PHENO_QUERY = {
-    'CAD_HF+ (Ward)': 'coronary artery disease',
-    'CAD_HF- (Ward)': 'coronary artery disease',
     'Colorectal Cancer (Chen)': 'colorectal carcinoma',
     'Esophagus Cancer (Chen)': 'esophageal carcinoma',
-    'HIV (Chang)': 'HIV infection',
-    'HIV + Tuberculosis (Chang)': 'tuberculosis',
-    'Tuberculosis (Chang)': 'tuberculosis',
     'Liver Cancer (Chen)': 'hepatocellular carcinoma',
     'Liver Cancer (Roskams-Hieter)': 'hepatocellular carcinoma',
     'Lung Cancer (Chen)': 'lung carcinoma',
-    'ME_CFS (Gardella)': 'chronic fatigue syndrome',
     'MGUS (Roskams-Hieter)': 'monoclonal gammopathy of undetermined significance',
     'MM (Roskams-Hieter)': 'multiple myeloma',
     'Pancreatic Cancer (Moore)': 'pancreatic carcinoma',
-    'Pancreatitis (Moore)': 'pancreatitis',
-    'Pre-eclampsia (Moufarrej)': 'pre-eclampsia',
     'Stomach Cancer (Chen)': 'gastric carcinoma',
     'Other Cancer (Moore)': 'cancer',
     'ICI-treated Cancer (Raissadati)': None,
-    'ICI-m (Raissadati)': 'myocarditis',
 }
 
 
@@ -60,16 +52,26 @@ def resolve(q):
     return (h[0]['id'], h[0]['name']) if h else (None, None)
 
 
-def assoc_targets(efo, size=TOP_N):
+def assoc_targets(efo, page_size=PAGE_SIZE):
+    """Fetch ALL disease-target associations (not capped), paginating page_size at a time."""
     q = ('query($id:String!,$p:Pagination!){disease(efoId:$id){name '
          'associatedTargets(page:$p,orderByScore:"score"){count '
          'rows{target{approvedSymbol} score}}}}')
-    d = gql(q, {'id': efo, 'p': {'index': 0, 'size': size}})
-    dd = d['data']['disease']
-    if dd is None:
-        return None, []
-    at = dd['associatedTargets']
-    return at['count'], [(r['target']['approvedSymbol'], round(r['score'], 4)) for r in at['rows']]
+    genes, count, index = [], None, 0
+    while True:
+        d = gql(q, {'id': efo, 'p': {'index': index, 'size': page_size}})
+        dd = d['data']['disease']
+        if dd is None:
+            return None, []
+        at = dd['associatedTargets']
+        count = at['count']
+        rows = at['rows']
+        genes.extend((r['target']['approvedSymbol'], round(r['score'], 4)) for r in rows)
+        if len(rows) < page_size or len(genes) >= count:
+            break
+        index += 1
+        time.sleep(0.2)
+    return count, genes
 
 
 def main():
@@ -86,7 +88,7 @@ def main():
             efo, name = resolve(q)
             cnt, genes = assoc_targets(efo) if efo else (0, [])
             rec = {'phenotype': ph, 'query': q, 'efo': efo, 'ot_disease': name,
-                   'n_assoc': cnt, 'top_n': TOP_N, 'genes': genes,
+                   'n_assoc': cnt, 'genes': genes,
                    'source': 'Open Targets Platform GraphQL v4', 'retrieved': today}
         json.dump(rec, open(outdir / f'{stem}.json', 'w'), indent=1)
         print(f'{ph:32s} {str(rec["efo"]):16s} n_genes={len(rec["genes"])}')

@@ -8,7 +8,7 @@ from pipeline.cohort_stats import adjust_pvalues, test_cohort_vs_cohort, test_vs
 MP = config.MODELING_PARAMS
 
 COMPARISONS = [
-    ('CAD_HF+_vs_CAD_HF-', 'CAD_HF- (Ward)', 'CAD_HF+ (Ward)'),
+    ('CAD_HF+_vs_CAD_HF-', 'CAD_HF+ (Ward)', 'CAD_HF- (Ward)'),
     ('Pancreatitis_vs_PDAC', 'Pancreatitis (Moore)', 'Pancreatic Cancer (Moore)'),
     ('ICI_Cancer_vs_ICIm', 'ICI-treated Cancer (Raissadati)', 'ICI-m (Raissadati)'),
 ]

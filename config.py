@@ -57,6 +57,8 @@ DESEQ2_GSEA_DIR    = BENCHMARK_DIR / "deseq2_gsea"
 DESEQ2_COV_RESULTS_DIR = BENCHMARK_DIR / "deseq2_covariate_results"
 DESEQ2_COV_GSEA_DIR    = BENCHMARK_DIR / "deseq2_covariate_gsea"
 
+CANCER_SCAN_DIR = MODELING_DIR / "Cancer_Signal_Scan"
+
 BIAS_COLUMNS = [
     "log(Total Reads)",
     "Spliced Reads (%)",
