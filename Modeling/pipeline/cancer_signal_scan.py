@@ -6,7 +6,9 @@ from scipy import stats
 from scipy.stats import fisher_exact
 
 import config
-from pipeline.cohort_stats import adjust_pvalues, test_vs_hc
+from pipeline.cohort_stats import adjust_pvalues, gene_symbol_map, test_vs_hc
+
+MP = config.MODELING_PARAMS
 
 # Cancer phenotypes with a valid Open Targets disease mapping (see build_disease_reference.py
 # PHENO_QUERY). ICI-treated Cancer has no single OT disease ID (heterogeneous cohort) and is
@@ -30,7 +32,7 @@ def vs_hc_path(pheno):
     return config.CANCER_SCAN_DIR / f'vs_hc_{stem}.csv'
 
 
-def vs_hc_table(dd, pheno, route=None, fdr_method='fdr_bh', save=True):
+def vs_hc_table(dd, pheno, route=None, fdr_method=MP['fdr_method'], save=True):
     """One-sample vs-HC Welch/t-test DEG table for a single cancer cohort (route-stratified
     BH -- pool-route genes excluded from the FDR family, see cohort_stats.py). Cache-first."""
     path = vs_hc_path(pheno)
@@ -38,8 +40,7 @@ def vs_hc_table(dd, pheno, route=None, fdr_method='fdr_bh', save=True):
         return pd.read_csv(path)
     Z = dd.Z_dis[dd.dis_pheno == pheno]
     df = test_vs_hc(Z, dd.gene_names, route=route, fdr_method=fdr_method)
-    sym = dict(zip(dd.gene_names, dd.gene_syms))
-    df['gene_sym'] = df['gene'].map(sym).fillna(df['gene'])
+    df['gene_sym'] = gene_symbol_map(dd.gene_names, dd.gene_syms).loc[df['gene']].values
     df.insert(0, 'phenotype', pheno)
     if save:
         config.CANCER_SCAN_DIR.mkdir(parents=True, exist_ok=True)
@@ -78,7 +79,7 @@ def per_sample_path():
     return config.CANCER_SCAN_DIR / 'per_sample_summary.csv'
 
 
-def per_sample_scan(dd, route=None, fdr_method='fdr_bh', padj_thr=0.05, save=True):
+def per_sample_scan(dd, route=None, fdr_method=MP['fdr_method'], padj_thr=MP['padj_thr'], save=True):
     """Per-INDIVIDUAL-SAMPLE significant-gene identification against Open Targets.
 
     For each single sample (not cohort-aggregate), BH-adjusts that sample's own per-gene
@@ -92,8 +93,7 @@ def per_sample_scan(dd, route=None, fdr_method='fdr_bh', padj_thr=0.05, save=Tru
     path = per_sample_path()
     if save and path.exists():
         return pd.read_csv(path)
-    sym = pd.Series(dd.gene_syms, index=dd.gene_names)
-    gene_syms = sym.fillna(pd.Series(dd.gene_names, index=dd.gene_names)).values
+    gene_syms = gene_symbol_map(dd.gene_names, dd.gene_syms).values
     model_mask = (np.asarray(route) != 'pool') if route is not None else np.ones(len(dd.gene_names), bool)
     universe = set(gene_syms[model_mask])
     rows = []
@@ -119,7 +119,7 @@ def per_sample_scan(dd, route=None, fdr_method='fdr_bh', padj_thr=0.05, save=Tru
     return summary
 
 
-def run_all(dd, route=None, fdr_method='fdr_bh', padj_thr=0.05, save=True):
+def run_all(dd, route=None, fdr_method=MP['fdr_method'], padj_thr=MP['padj_thr'], save=True):
     """Per-cancer-phenotype vs-HC DEG + OT-reference enrichment scan. Returns a summary
     DataFrame sorted by enrichment p-value (most validated signal first). Route-stratified:
     only model-route genes (route != 'pool') are counted toward padj significance and the
@@ -142,4 +142,26 @@ def run_all(dd, route=None, fdr_method='fdr_bh', padj_thr=0.05, save=True):
     if save:
         config.CANCER_SCAN_DIR.mkdir(parents=True, exist_ok=True)
         summary.to_csv(config.CANCER_SCAN_DIR / 'summary.csv', index=False)
+    return summary
+
+
+def attach_ood_distance(summary, save=True):
+    """Adds mahal_dist + ood_threshold columns to a per_sample_scan summary (Mahalanobis
+    distance of each sample's covariates from the HC-fit distribution, config.MODELING_PARAMS
+    ood_percentile threshold) -- lets downstream plots/filters distinguish a genuine
+    per-sample disease signal from a broad covariate outlier riding near the OOD cutoff."""
+    from pipeline import data_prep
+    from sample_filter import MahalanobisFilter
+    adata = data_prep.load_adata()
+    is_hc, _, _ = data_prep.make_phenotypes(adata)
+    X_raw = data_prep.bias_matrix(adata)
+    sample_ids = np.array(adata.obs_names)
+    ood = MahalanobisFilter(percentile=config.MODELING_PARAMS['ood_percentile'])
+    ood.fit(X_raw[is_hc])
+    dist_map = dict(zip(sample_ids, ood.distances(X_raw)))
+    summary = summary.copy()
+    summary['mahal_dist'] = summary['sample'].map(dist_map)
+    summary['ood_threshold'] = ood.threshold_
+    if save:
+        summary.to_csv(per_sample_path(), index=False)
     return summary

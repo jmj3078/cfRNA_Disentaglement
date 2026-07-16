@@ -3,7 +3,7 @@ import pandas as pd
 import gseapy as gp
 
 import config
-from pipeline.cohort_stats import adjust_pvalues, test_cohort_vs_cohort, test_vs_hc
+from pipeline.cohort_stats import adjust_pvalues, gene_symbol_map, test_cohort_vs_cohort, test_vs_hc
 
 MP = config.MODELING_PARAMS
 
@@ -18,7 +18,7 @@ def compare_path(name):
     return config.COHORT_COMPARE_DIR / f'deg_{name}.csv'
 
 
-def run_comparison(dd, name, pheno_a, pheno_b, route=None, fdr_method='fdr_bh',
+def run_comparison(dd, name, pheno_a, pheno_b, route=None, fdr_method=MP['fdr_method'],
                    min_hc_dev=None, save=True):
     path = compare_path(name)
     if save and path.exists():
@@ -36,8 +36,7 @@ def run_comparison(dd, name, pheno_a, pheno_b, route=None, fdr_method='fdr_bh',
         keep = model_mask & (df['hc_dev_max'].values > min_hc_dev)
         df.loc[model_mask, 'padj'] = np.nan
         df.loc[keep, 'padj'] = adjust_pvalues(df.loc[keep, 'pval'].values, method=fdr_method)
-    sym = dict(zip(dd.gene_names, dd.gene_syms))
-    df['gene_sym'] = df['gene'].map(sym).fillna(df['gene'])
+    df['gene_sym'] = gene_symbol_map(dd.gene_names, dd.gene_syms).loc[df['gene']].values
     df.insert(0, 'pheno_b', pheno_b)
     df.insert(0, 'pheno_a', pheno_a)
     df.insert(0, 'comparison', name)
@@ -47,7 +46,7 @@ def run_comparison(dd, name, pheno_a, pheno_b, route=None, fdr_method='fdr_bh',
     return df
 
 
-def run_all(dd, route=None, fdr_method='fdr_bh', min_hc_dev=None, save=True):
+def run_all(dd, route=None, fdr_method=MP['fdr_method'], min_hc_dev=None, save=True):
     return {name: run_comparison(dd, name, a, b, route=route, fdr_method=fdr_method,
                                  min_hc_dev=min_hc_dev, save=save)
             for name, a, b in COMPARISONS}
@@ -57,7 +56,7 @@ def gsea_run_dir(name):
     return config.COHORT_COMPARE_GSEA_DIR / name
 
 
-def run_gsea(df, name, min_size=10, max_size=500, fdr_thr=0.25, save=True):
+def run_gsea(df, name, min_size=10, max_size=500, fdr_thr=MP['cohort_gsea_fdr_thr'], save=True):
     outdir = gsea_run_dir(name)
     out_path = outdir / f'gsea_result_{name}.csv'
     if save and out_path.exists():

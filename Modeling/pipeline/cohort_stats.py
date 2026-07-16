@@ -3,6 +3,16 @@ import pandas as pd
 from scipy import stats
 from statsmodels.stats.multitest import multipletests
 
+import config
+
+MP = config.MODELING_PARAMS
+
+
+def gene_symbol_map(gene_names, gene_syms):
+    """Series of gene_syms aligned to gene_names, NaN falls back to the gene id itself."""
+    sym = pd.Series(gene_syms, index=gene_names)
+    return sym.fillna(pd.Series(gene_names, index=gene_names))
+
 
 def storey_qvalue(pvals, lam=None):
     """Storey & Tibshirani (2003) q-value: estimates pi0 (true-null fraction) from the
@@ -27,7 +37,7 @@ def storey_qvalue(pvals, lam=None):
     return q
 
 
-def adjust_pvalues(pvals, method='fdr_bh'):
+def adjust_pvalues(pvals, method=MP['fdr_method']):
     """method='storey' for Storey's q-value; anything else is passed to
     statsmodels.multipletests (e.g. 'fdr_bh', 'fdr_by', 'bonferroni')."""
     if method == 'storey':
@@ -51,7 +61,7 @@ def _fdr(df, fdr_method):
     return df
 
 
-def _test(Z, gene_names, ref=None, route=None, fdr_method='fdr_bh'):
+def _test(Z, gene_names, ref=None, route=None, fdr_method=MP['fdr_method']):
     """Shared implementation for test_vs_hc / test_cohort_vs_cohort.
 
     route : optional array aligned to gene_names (e.g. scoring.gene_stage() mapped to
@@ -71,7 +81,7 @@ def _test(Z, gene_names, ref=None, route=None, fdr_method='fdr_bh'):
     return df.sort_values('pval').reset_index(drop=True)
 
 
-def test_vs_hc(Z, gene_names, route=None, fdr_method='fdr_bh'):
+def test_vs_hc(Z, gene_names, route=None, fdr_method=MP['fdr_method']):
     """One-sample t-test per gene (H0: mean_Z == 0), BH-adjusted padj.
 
     Z : (n_samples, n_genes) cohort Z-score matrix.
@@ -80,24 +90,10 @@ def test_vs_hc(Z, gene_names, route=None, fdr_method='fdr_bh'):
     return _test(Z, gene_names, route=route, fdr_method=fdr_method)
 
 
-def test_cohort_vs_cohort(Z_a, Z_b, gene_names, route=None, fdr_method='fdr_bh'):
+def test_cohort_vs_cohort(Z_a, Z_b, gene_names, route=None, fdr_method=MP['fdr_method']):
     """Two-sample Welch's t-test per gene between two disease cohorts, BH-adjusted.
 
     Z_a, Z_b : (n_samples, n_genes) Z-score matrices for cohort A and cohort B.
     Returns DataFrame [gene, (route), mean_diff, stat, pval, padj], sorted by pval.
     """
     return _test(Z_a, gene_names, ref=Z_b, route=route, fdr_method=fdr_method)
-
-
-def sig_gene_set(Z, gene_names, ref=None, route=None, padj_thr=0.05, fdr_method='fdr_bh',
-                  include_pool=False):
-    """Set of gene_names with padj < padj_thr from test_vs_hc or test_cohort_vs_cohort.
-
-    ref : optional second Z matrix -> cohort_vs_cohort; otherwise vs_hc.
-    route/include_pool : when route is given, 'pool'-route genes are excluded from the
-    returned set by default (include_pool=True to opt in) -- see _test docstring.
-    """
-    df = _test(Z, gene_names, ref=ref, route=route, fdr_method=fdr_method)
-    if route is not None and not include_pool:
-        df = df[df['route'] != 'pool']
-    return set(df.loc[df['padj'] < padj_thr, 'gene'])

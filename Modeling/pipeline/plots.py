@@ -198,7 +198,7 @@ def _fdr_sig_count_per_sample(Z, padj_thr, fdr_method):
     return counts
 
 
-def plot_zscore_outlier_hist(Z_dis, dis_pheno, route=None, padj_thr=0.05, fdr_method='fdr_bh',
+def plot_zscore_outlier_hist(Z_dis, dis_pheno, route=None, padj_thr=MP['padj_thr'], fdr_method=MP['fdr_method'],
                              fig_dir=None, save=True):
     """Per-phenotype distribution of the per-sample count of FDR-significant genes
     (padj/qval < padj_thr), replacing the old raw |z|>thresh count. fdr_method: 'fdr_bh'
@@ -238,7 +238,7 @@ def plot_zscore_outlier_hist(Z_dis, dis_pheno, route=None, padj_thr=0.05, fdr_me
 
 
 # ── cohort-vs-cohort DEG (cohort_compare) ───────────────────────────────────
-def plot_volcano(df, name, padj_thr=0.05, top_n_labels=15, fig_dir=None, save=True):
+def plot_volcano(df, name, padj_thr=MP['padj_thr'], top_n_labels=15, fig_dir=None, save=True):
     """Volcano plot for a cohort_compare.run_comparison() DEG table.
 
     x = mean_diff: the difference in mean Z between the two cohorts. This is a standardized
@@ -364,7 +364,7 @@ def _stage_of(df):
 MODEL_STAGES = ('nbi', 'nb_fixed', 'intercept')
 
 
-def _model_padj_cutoff(model_df, padj_thr, fdr_method='fdr_bh'):
+def _model_padj_cutoff(model_df, padj_thr, fdr_method=MP['fdr_method']):
     """Smallest |z| among model-route genes with adjusted padj/qval < padj_thr, treating each
     gene's own score as a per-sample z-test (p = 2*(1-Phi(|z|))). None if nothing passes.
     fdr_method: 'fdr_bh' (default), 'fdr_by', 'storey', or anything cohort_stats.adjust_pvalues
@@ -426,7 +426,7 @@ def _rare_heatmap_panel(ax, rare_df, max_labels=40):
     cbar.ax.tick_params(labelsize=6)
 
 
-def plot_sample(df, sample_id, phenotype='', top_n=20, padj_thr=0.05, fdr_method='fdr_bh'):
+def plot_sample(df, sample_id, phenotype='', top_n=20, padj_thr=MP['padj_thr'], fdr_method=MP['fdr_method']):
     """Model-route genes are flagged by an adjusted padj<padj_thr cutoff on their own
     per-sample z (nbi-based cutoff, computed only across nbi/nb_fixed/intercept genes).
     fdr_method: 'fdr_bh' (default), 'fdr_by', 'storey', or anything
@@ -716,5 +716,75 @@ def plot_db_hit_rates(rates, summary, fig_dir=None, save=True):
     fig.tight_layout()
     if save:
         plt.savefig(fig_dir / 'db_hit_rates.png', bbox_inches='tight', dpi=200)
+    plt.show()
+    return fig
+
+
+# ── per-sample cancer signal scan (cancer_signal_scan) ──────────────────────
+def plot_cancer_signal_scan(summary, margin=0.5, padj_thr=MP['padj_thr'], top_n=20, fig_dir=None, save=True):
+    """Publication figure for cancer_signal_scan.per_sample_scan() + attach_ood_distance().
+
+    Panel A: every scanned sample, Mahalanobis OOD distance (x) vs -log10(Open Targets
+    overlap enrichment p-value) (y). Samples within `margin` of the OOD threshold are shown
+    as hollow markers (technical-outlier risk, e.g. broad covariate extremity rather than a
+    clean disease-specific signal) and excluded from Panel B and the top-N labels.
+    Panel B: top-N clean, OT-validated individual cases ranked by enrichment significance.
+    """
+    d = summary.copy()
+    d['pheno_short'] = d['phenotype'].str.replace(r'\s*\([^)]*\)\s*$', '', regex=True)
+    dupe_short = d.groupby('pheno_short')['phenotype'].transform('nunique') > 1
+    d.loc[dupe_short, 'pheno_short'] = d.loc[dupe_short, 'phenotype']
+    phenos = sorted(d['phenotype'].unique())
+    cmap = plt.get_cmap('tab10')
+    color_of = {ph: cmap(i % 10) for i, ph in enumerate(phenos)}
+    d['neglog10_p'] = -np.log10(d['enrichment_pval'].clip(lower=1e-300))
+    d['clean'] = d['mahal_dist'] < (d['ood_threshold'] - margin)
+    thr = d['ood_threshold'].iloc[0]
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 6.5), gridspec_kw={'width_ratios': [1, 1.15]})
+
+    ax = axes[0]
+    for ph in phenos:
+        sub = d[d['phenotype'] == ph]
+        c = sub[sub['clean']]
+        b = sub[~sub['clean']]
+        ax.scatter(c['mahal_dist'], c['neglog10_p'], s=22, color=color_of[ph], alpha=0.85,
+                  edgecolors='none', label=sub['pheno_short'].iloc[0])
+        ax.scatter(b['mahal_dist'], b['neglog10_p'], s=28, facecolors='none',
+                  edgecolors=color_of[ph], linewidths=1.0)
+    ax.axvline(thr, color='grey', lw=1, ls='--')
+    ax.axvline(thr - margin, color='grey', lw=0.7, ls=':')
+    ax.axhline(-np.log10(padj_thr), color='grey', lw=0.7, ls=':')
+    ax.text(thr, ax.get_ylim()[1], ' OOD cutoff', fontsize=7, color='grey',
+           ha='left', va='top', rotation=90)
+    ax.set_xlabel('Sample covariate distance from HC (Mahalanobis)')
+    ax.set_ylabel('-log10(Open Targets overlap p-value)')
+    ax.set_title('A. All scanned samples', loc='left', fontweight='bold')
+    ax.legend(fontsize=6.5, frameon=False, loc='upper center', bbox_to_anchor=(0.5, -0.16),
+             ncol=3, markerscale=1.2, columnspacing=0.8, handletextpad=0.4)
+
+    clean_sig = d[d['clean'] & (d['enrichment_pval'] < padj_thr)] \
+        .sort_values('enrichment_pval').head(top_n).iloc[::-1]
+    ax2 = axes[1]
+    colors = [color_of[ph] for ph in clean_sig['phenotype']]
+    ax2.barh(range(len(clean_sig)), clean_sig['neglog10_p'].values, color=colors, alpha=0.85,
+            edgecolor='white')
+    ax2.set_yticks(range(len(clean_sig)))
+    ax2.set_yticklabels([f"{s} — {ph}" for s, ph in
+                         zip(clean_sig['sample'], clean_sig['pheno_short'])], fontsize=7)
+    xmax = clean_sig['neglog10_p'].max()
+    for i, (_, row) in enumerate(clean_sig.iterrows()):
+        ax2.text(row['neglog10_p'] + xmax * 0.015, i, f"{row['n_overlap']}/{row['n_sig_genes']} genes",
+                 fontsize=6.5, va='center', color='grey')
+    ax2.set_xlim(0, xmax * 1.22)
+    ax2.set_xlabel('-log10(Open Targets overlap p-value)')
+    ax2.set_title(f'B. Top {len(clean_sig)} validated individual cases', loc='left', fontweight='bold')
+
+    plt.tight_layout()
+    if save:
+        fig_dir = fig_dir or config.CANCER_SCAN_FIG_DIR
+        fig_dir.mkdir(parents=True, exist_ok=True)
+        plt.savefig(fig_dir / 'cancer_signal_scan.png', dpi=300, bbox_inches='tight')
+        plt.savefig(fig_dir / 'cancer_signal_scan.pdf', bbox_inches='tight')
     plt.show()
     return fig

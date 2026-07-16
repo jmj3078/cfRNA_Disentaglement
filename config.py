@@ -58,6 +58,7 @@ DESEQ2_COV_RESULTS_DIR = BENCHMARK_DIR / "deseq2_covariate_results"
 DESEQ2_COV_GSEA_DIR    = BENCHMARK_DIR / "deseq2_covariate_gsea"
 
 CANCER_SCAN_DIR = MODELING_DIR / "Cancer_Signal_Scan"
+CANCER_SCAN_FIG_DIR = CANCER_SCAN_DIR / "Figures"
 
 BIAS_COLUMNS = [
     "log(Total Reads)",
@@ -95,6 +96,12 @@ MODELING_PARAMS = {
     "gsea_seed":       42,
     "sig_cap_per_theme": 8,
     "emap_sim_thr":    0.50,
+    "padj_thr":        0.05,   # gene-level FDR-significance cutoff (cohort_stats/cohort_compare/cancer_signal_scan)
+    "fdr_method":      "fdr_bh",
+    # gseapy prerank is a competitive gene-set test, much more conservative than gene-level
+    # FDR -- Subramanian et al. 2005 PNAS use FDR<=0.25 throughout, not 0.05 (see
+    # cohort_compare.run_gsea docstring). Deliberately separate from gsea_fdr_thr above.
+    "cohort_gsea_fdr_thr": 0.25,
     # engine (NZ-gated demotion chain)
     "nz_a_max":          7,
     "trend_min_nz":      30,     # min HC nonzero samples for a gene to enter dispersion-trend fitting
