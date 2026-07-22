@@ -45,14 +45,30 @@ the batch axis: fit-time confound removal, never score-time reuse.
 
 | stage | mu | sigma / dispersion | on failure |
 |---|---|---|---|
-| nbi | fixed covariates + batch random intercept (glmmTMB `nbinom2`) | fixed covariates only, no batch (glmmTMB `dispformula`) | demote to nb_fixed |
-| nb_fixed | fixed covariates + batch random intercept | fixed from Phase-0 trend (unchanged) | demote to intercept |
-| intercept | population intercept + batch random intercept only (no covariates) | fixed from Phase-0 trend | **exclude** (no closed-form fallback below this — accepted tradeoff) |
+| nbi | fixed covariates + batch random intercept (glmmTMB `nbinom2`) | fixed covariates only, no batch (glmmTMB `dispformula`, ridge via `priors()`) | demote to nbi_disp_intercept |
+| **nbi_disp_intercept** (new) | fixed covariates + batch random intercept (same as nbi) | scalar, gene-own MLE (glmmTMB `dispformula = ~1`, no covariates, no ridge needed) | demote to nb_fixed |
+| nb_fixed | fixed covariates + batch random intercept | fixed from Phase-0 trend, via a glmmTMB offset (`dispformula = ~0 + offset(fixed_log_theta)`, `fixed_log_theta = -log(alpha_of(mean))` per the sign convention in the "Sigma/dispersion regularization" section below) — not estimated at all | demote to intercept |
+| intercept | population intercept + batch random intercept only (no covariates) | fixed from Phase-0 trend (same offset mechanism as nb_fixed) | **exclude** (no closed-form fallback below this — accepted tradeoff) |
 | pool (rare, NZ<7) | shared beta (unchanged) + batch random intercept | existing Poisson/NB overdispersion-ratio choice (unchanged) | on GLMM non-convergence/singularity-collapse, **fall back to the current non-batch pooled GLM** — pool must always succeed |
 
 sigma/dispersion never gets a batch random effect at any stage — batch-level
 sample counts are too small (median 9 HC/batch, 25th pct = 1) for a second
 variance component to be identifiable on top of the mean random effect.
+
+**`nbi_disp_intercept` rationale** (added after the Step 0 spike's Task 4/5
+findings): Task 4 found that unpenalized dispersion regression on all 10
+covariates was specifically what destabilized fits (non-positive-definite
+Hessian on 2-3/40 pilot genes), not the mean submodel. Jumping straight from
+"dispersion depends on 10 covariates" to "dispersion is entirely borrowed
+from the cross-gene Phase-0 trend" (the original two-stage design) throws
+away this gene's own dispersion information in one step. A scalar,
+intercept-only dispersion — still gene-specific, still directly MLE'd from
+this gene's own counts, just not regressed on covariates — is a natural
+intermediate demotion step and is implemented as the same glmmTMB call with
+only `dispformula` changed (`~X` -> `~1` -> a fixed offset), not separate
+fitting machinery. Whether this stage meaningfully reduces the demotion rate
+into `nb_fixed`/`intercept` (vs. going straight there) is an empirical
+question for the full-engine build's own validation, not this spec.
 
 ### Failure vs. singular-fit distinction (demotion chain change)
 
@@ -62,10 +78,25 @@ often converge to τ²≈0 with a boundary/singular-fit warning from glmmTMB —
 that is a valid result, not a failure, and must not be a demotion trigger.
 
 - **True failure (demote)**: optimizer non-convergence, exception, or
-  fixed-effect coefficient explosion (`beta_explode_thr`, unchanged
-  criterion, applied to fixed-effect coefficients only — τ² is exempt).
+  fixed-effect coefficient explosion (`beta_explode_thr`, applied to BOTH
+  the mean and dispersion submodel coefficients — Task 4's spike finding
+  was specifically that dispersion coefficients, not mean, are what explode
+  on unstable fits, so checking only the mean submodel would miss it).
 - **Singular but converged (accept + flag)**: record `batch_glmm_singular`
   on `GeneRecord`; does not demote.
+- **τ² is not unconditionally exempt** (a correction from the Step 0 spike):
+  the convergence check should be based on glmmTMB's own `fit$sdr$pdHess`
+  diagnostic, not string-matching on R warning text. `pdHess == FALSE` with
+  τ² at/near the zero boundary (< 1e-5) and no coefficient explosion is the
+  benign "boundary singular fit" case above and should be rescued as
+  converged with τ² forced to exactly 0. But `pdHess == TRUE` with an
+  implausibly *large* τ² (>= `beta_explode_thr²` = 9.0, the same magnitude
+  gate as the coefficient check, applied to the variance scale) should
+  still be treated as non-identifiable and demoted — the Step 0 spike found
+  a real pilot gene (`ENSG00000187959.9`, τ²=30.4) where the Hessian looked
+  fine but the batch-variance estimate itself was driven to an implausible
+  magnitude, almost certainly by one of this cohort's many low-n HC batches
+  (n=1 to n=116) rather than real batch heterogeneity.
 
 ### Conditional vs. marginal residuals (new distinction)
 
