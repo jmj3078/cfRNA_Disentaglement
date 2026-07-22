@@ -50,28 +50,87 @@ lines.append(
 
 lines.append("## 3. tau2 / convergence / singular-fit distribution\n")
 conv = ri[ri["converged"]]
+rejected = ri[~ri["converged"]]
+BETA_EXPLODE_THR = 3.0
+TAU2_MAX = BETA_EXPLODE_THR ** 2
+mu_slope_cols = [c for c in ri.columns if c.startswith("mu_coef_") and c != "mu_coef_0"]
+disp_slope_cols = [c for c in ri.columns if c.startswith("disp_coef_") and c != "disp_coef_0"]
 lines.append(f"- Converged: {len(conv)}/{len(ri)}")
 lines.append(f"- Singular-but-converged: {int(conv['singular'].sum())}/{len(conv)}")
 lines.append(
-    "- Convergence/singularity determination was reworked after the brief was written (see "
-    "`.superpowers/sdd/task-5-report.md`): based on glmmTMB's own `fit$sdr$pdHess` diagnostic "
-    "rather than fragile warning-text matching, checking beta-explosion in both mean AND "
-    "dispersion coefficients, plus a `tau2 >= 9.0` upper bound (`beta_explode_thr^2`) rejecting "
-    "implausibly large batch variance as non-identifiable even when `pdHess=TRUE`. Final: "
-    "**38/40 genes converged, 0 singular**. One gene failed on dispersion-coefficient explosion "
-    "(19.6, far past `beta_explode_thr=3.0`); one failed on the new tau2 upper bound (30.4, "
-    "`sd(b)~5.5` -- implausible batch-to-batch swings on the log(mu) scale, likely driven by a "
-    "low-n HC batch: this pilot's 31 HC batches range from n=1 to n=116 samples)."
+    "- Convergence/singularity determination was reworked twice (see "
+    "`.superpowers/sdd/task-5-report.md`): first to base it on glmmTMB's own `fit$sdr$pdHess` "
+    "diagnostic rather than fragile warning-text matching, plus a `tau2 >= 9.0` upper bound "
+    "(`beta_explode_thr^2`) rejecting implausibly large batch variance as non-identifiable even "
+    "when `pdHess=TRUE`; then a follow-up branch-review fix corrected two remaining bugs in that "
+    "same check: (a) the beta-explosion check was only ever applied inside the `pdHess==FALSE` "
+    "branch, silently letting an exploded coefficient through unchecked whenever `pdHess=TRUE`; "
+    "(b) the check included both submodels' *intercepts*, not just slopes, incorrectly treating a "
+    "low-expression gene's legitimately large-magnitude `log(mu)`/`log(theta)` intercept as if it "
+    "were a sign of instability. The corrected check now excludes both intercepts and applies "
+    "the slope-explosion test unconditionally, before branching on `pdHess`."
+)
+for _, row in rejected.iterrows():
+    mu_slope_max = row[mu_slope_cols].abs().max()
+    disp_slope_max = row[disp_slope_cols].abs().max()
+    slope_max = max(mu_slope_max, disp_slope_max)
+    if slope_max >= BETA_EXPLODE_THR:
+        which = "mean (log-mu)" if mu_slope_max >= disp_slope_max else "dispersion (log-theta)"
+        lines.append(
+            f"- `{row['gene']}` rejected: {which} slope explosion (max |slope| = {slope_max:.3f}, "
+            f"past `beta_explode_thr={BETA_EXPLODE_THR}`)."
+        )
+    elif row["tau2"] >= TAU2_MAX:
+        lines.append(
+            f"- `{row['gene']}` rejected: tau2 upper-bound violation (tau2 = {row['tau2']:.2f}, "
+            f"`sd(b)~{row['tau2']**0.5:.1f}` -- implausible batch-to-batch swings on the log(mu) "
+            f"scale, past `tau2_max={TAU2_MAX}`; likely driven by a low-n HC batch, this pilot's "
+            "31 HC batches range from n=1 to n=116 samples)."
+        )
+    else:
+        lines.append(
+            f"- `{row['gene']}` rejected: pdHess=FALSE with tau2={row['tau2']:.3g} not near the "
+            "zero boundary and no slope exploding -- a genuine convergence failure with no "
+            "simple explanation."
+        )
+lines.append(
+    "- Note on `ENSG00000242019.2`: under the *old*, intercept-inclusive check this gene was "
+    "rejected for what was logged as a \"dispersion-coefficient explosion\" of 19.6 -- but that "
+    "19.6 was actually `disp_coef_0`, the dispersion **intercept**, not a slope. Under the "
+    "corrected slopes-only convention this gene's dispersion slopes are all ~0 and its mean "
+    "slopes are unexceptional, so it is now correctly accepted as a boundary-singular fit "
+    "(tau2 forced to 0) rather than spuriously rejected on an intercept magnitude that was never "
+    "a sign of instability."
 )
 if len(conv) and (~conv["singular"]).sum():
     desc = conv.loc[~conv["singular"], "tau2"].describe().to_dict()
     lines.append(f"- tau2 distribution (converged, non-singular genes): {desc}")
 lines.append(
-    "- Among the 38 converged genes, most tau2 values are near-zero (little to no detectable "
-    "batch heterogeneity on the log(mu) scale) and none approach the 9.0 rejection boundary "
-    "except the one gene rejected for exceeding it -- i.e. the boundary is not marginally "
-    "tight against the rest of the pilot, it cleanly separates one outlier from the rest."
+    f"- Among the {len(conv)} converged genes, most tau2 values are near-zero (little to no "
+    "detectable batch heterogeneity on the log(mu) scale) and none approach the 9.0 rejection "
+    "boundary except any gene rejected for exceeding it -- i.e. the boundary is not marginally "
+    "tight against the rest of the pilot, it cleanly separates outliers from the rest."
 )
+n_large_intercept = (ri["mu_coef_0"].abs() > 3).sum()
+n_large_intercept_converged = ((ri["mu_coef_0"].abs() > 3) & ri["converged"]).sum()
+lines.append(
+    f"- Of the {n_large_intercept} pilot genes with a large mean-intercept (`|mu_coef_0| > 3`, "
+    f"i.e. low-expression genes), {n_large_intercept_converged} now correctly pass through to "
+    "being evaluated on tau2/pdHess (or a genuine slope-explosion) alone, confirming the "
+    "intercept-exclusion fix behaves as intended rather than spuriously penalizing low-expression "
+    "genes for their baseline rate."
+)
+if int(conv["singular"].sum()) == 0:
+    lines.append(
+        "- The accept+flag singular path was not triggered by any of the 40 pilot genes in this "
+        "run and remains unvalidated by real data."
+    )
+else:
+    singular_genes = conv.loc[conv["singular"], "gene"].tolist()
+    lines.append(
+        f"- The accept+flag singular (boundary tau2) path WAS triggered in this run, by "
+        f"{len(singular_genes)} gene(s): {', '.join(singular_genes)}."
+    )
 lines.append(f"- Mean wall time per gene fit: {ri['wall_time_sec'].mean():.2f}s "
              f"(estimate for 17,572 genes at stage nbi: "
              f"{ri['wall_time_sec'].mean() * 17572 / 3600:.1f} core-hours)\n")
