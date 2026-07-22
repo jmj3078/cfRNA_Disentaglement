@@ -25,6 +25,12 @@ priors_df <- if (use_priors) data.frame(prior = "normal(0, 0.05)", class = "beta
 # Python config are kept fully separate by design in this spike, so this is duplicated here.
 BETA_EXPLODE_THR <- 3.0
 
+# Symmetric cutoff on the variance scale: tau2 is Var(b) on the log(mu) link, so
+# sd(b) >= BETA_EXPLODE_THR is as implausible for a random intercept as a fixed-effect
+# coefficient of the same magnitude would be (sd(b)=3 already implies e^{+-6}-fold
+# batch swings; tau2=9 is the point at which we stop trusting the estimate at all).
+TAU2_MAX <- BETA_EXPLODE_THR^2
+
 # Principled convergence/singularity check based on TMB's own positive-definite-Hessian
 # diagnostic (fit$sdr$pdHess), rather than fragile string-matching on R warning text.
 # pdHess FALSE does not always mean a genuine optimizer failure: a batch variance
@@ -35,10 +41,21 @@ BETA_EXPLODE_THR <- 3.0
 # fixed-effect coefficients are not exploding -- checked in BOTH the mean (cond) and
 # dispersion (disp) submodels, since Task 4 found dispersion coefficients, not mean, were
 # the ones that actually explode on genuinely unstable fits.
-is_converged <- function(fit, beta_explode_thr) {
+# Conversely, pdHess TRUE is not sufficient either: a Hessian can look positive-definite
+# while tau2 itself has blown up to an implausible magnitude (a handful of extreme-n
+# batches -- this pilot's HC batches range from n=1 to n=116 -- can pull the optimizer to
+# a huge batch-variance estimate that the Hessian still certifies as a local optimum). We
+# treat tau2 >= tau2_max as non-identifiable and refuse to trust it downstream, exactly as
+# we already refuse to trust an exploding fixed-effect coefficient.
+is_converged <- function(fit, beta_explode_thr, tau2_max) {
   if (inherits(fit, "try-error")) return(list(ok = FALSE, singular = NA, tau2 = NA))
   tau2 <- as.numeric(VarCorr(fit)$cond$batch__[1, 1])
   if (isTRUE(fit$sdr$pdHess)) {
+    if (isTRUE(tau2 >= tau2_max)) {
+      # Hessian is fine but the batch variance itself is implausibly large -- treat as
+      # a non-identifiable fit, not a trustworthy convergence.
+      return(list(ok = FALSE, singular = NA, tau2 = tau2))
+    }
     return(list(ok = TRUE, singular = FALSE, tau2 = tau2))
   }
   beta_max <- max(abs(c(fixef(fit)$cond, fixef(fit)$disp)))
@@ -62,7 +79,7 @@ for (g in genes) {
     } else {
       glmmTMB(fml_mu, dispformula = fml_disp, family = nbinom2(), data = df)
     }
-    conv <- is_converged(fit, BETA_EXPLODE_THR)
+    conv <- is_converged(fit, BETA_EXPLODE_THR, TAU2_MAX)
     list(converged = conv$ok, singular = conv$singular, tau2 = conv$tau2,
          mu_coef = as.numeric(fixef(fit)$cond), disp_coef = as.numeric(fixef(fit)$disp))
   }, error = function(e) list(converged = FALSE, singular = NA, tau2 = NA,
