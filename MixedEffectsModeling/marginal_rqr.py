@@ -1,8 +1,21 @@
 import numpy as np
 from numpy.polynomial.hermite_e import hermegauss
-from scipy.stats import nbinom, norm
+from scipy.stats import nbinom, norm, poisson
 
 RQR_EPS = 1e-8
+
+
+# Poisson-family RQR fallback for route "pool" when fit_pooled_glmm's own
+# deviance/df check selects family=="poisson" over negbin. Copied from
+# Modeling/model_engine.py's _poisson_rqr, per the isolation requirement (see
+# _nb_rqr's comment below).
+def _poisson_rqr(y, mu, seed=None):
+    y = np.asarray(y)
+    lo = np.where(y > 0, poisson.cdf(y - 1, mu), 0.0)
+    hi = poisson.cdf(y, mu)
+    lo = np.clip(lo, RQR_EPS, 1 - RQR_EPS); hi = np.clip(hi, RQR_EPS, 1 - RQR_EPS)
+    rng = np.random.default_rng(seed)
+    return norm.ppf(rng.uniform(np.minimum(lo, hi), np.maximum(lo, hi))).astype(np.float32)
 
 
 def _nb_cdf(y, mu, alpha):

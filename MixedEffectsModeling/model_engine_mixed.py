@@ -1,3 +1,4 @@
+import json
 import pickle
 import subprocess
 import sys
@@ -13,7 +14,7 @@ from sklearn.preprocessing import StandardScaler
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import MixedEffectsModeling.config as config
 from MixedEffectsModeling.dispersion_trend import build_trend, load_trend, save_trend
-from MixedEffectsModeling.marginal_rqr import marginal_nb_rqr
+from MixedEffectsModeling.marginal_rqr import _poisson_rqr, marginal_nb_rqr
 
 MP = config.SPIKE_PARAMS
 
@@ -30,6 +31,7 @@ class GeneRecordMixed:
     mu_coef: np.ndarray = None
     disp_coef: np.ndarray = None
     fail_reason: str = ""
+    mean_hc: float = None
 
 
 class NormativeModelEngineMixed:
@@ -43,6 +45,7 @@ class NormativeModelEngineMixed:
         self.genes = {}
         self.alpha_fn = None
         self.nz_a_max = None
+        self.rare_glm = None
 
     def load_hc_data(self, h5ad_path=config.H5AD_PATH):
         adata = sc.read_h5ad(h5ad_path)
@@ -105,6 +108,45 @@ class NormativeModelEngineMixed:
             if not rec.ok:
                 rec.route = "excluded"
 
+        self.train_pool(tmp_dir=tmp_dir)
+
+    def train_pool(self, tmp_dir="/tmp/glmm_train"):
+        """Route "pool": one shared-beta pooled GLM (+ batch random intercept)
+        fit jointly across all pool-route genes via glmm_helpers.R's
+        fit_pooled_glmm, called through a small dedicated Rscript wrapper
+        (glmm_fit_pool.R) rather than glmm_fit.R's per-gene cascade."""
+        pool_genes = [g for g, r in self.genes.items() if r.route == "pool"]
+        if not pool_genes:
+            return
+        Path(tmp_dir).mkdir(exist_ok=True)
+        Y_pool = self.Y_hc[:, [self._gene_col[g] for g in pool_genes]]
+        pd.DataFrame(Y_pool, columns=pool_genes).to_csv(f"{tmp_dir}/Y_pool.csv.gz")
+        pd.DataFrame({"gene": pool_genes}).to_csv(f"{tmp_dir}/genes_pool.csv", index=False)
+        # X.csv.gz/batch.csv.gz are the same HC design/batch already written above
+        # for the model-route cascade -- reused as-is, not recomputed.
+
+        subprocess.run([
+            "Rscript", str(config.GLMM_FIT_POOL_R), "--x", f"{tmp_dir}/X.csv.gz", "--y", f"{tmp_dir}/Y_pool.csv.gz",
+            "--batch", f"{tmp_dir}/batch.csv.gz", "--genes", f"{tmp_dir}/genes_pool.csv",
+            "--rare-overdisp-thr", str(MP["rare_overdisp_thr"]), "--out", f"{tmp_dir}/results_pool.json",
+        ], check=True, cwd=str(config.GLMM_FIT_POOL_R.parent))
+
+        with open(f"{tmp_dir}/results_pool.json") as f:
+            fit = json.load(f)
+
+        if not fit["ok"]:
+            for g in pool_genes:
+                self.genes[g].route = "excluded"
+                self.genes[g].fail_reason = "fit_pooled_glmm failed"
+            return
+
+        n_hc = self.X_hc_scaled.shape[0]
+        self.rare_glm = {"family": fit["family"], "beta": np.asarray(fit["beta"]),
+                         "alpha": fit["alpha"], "eps": 1.0 / (2 * n_hc)}
+        for g, m in zip(fit["gene"], fit["mean_hc"]):
+            rec = self.genes[g]
+            rec.mean_hc, rec.ok, rec.stage = float(m), True, "pool"
+
     def training_summary(self):
         rows = [dict(gene=r.name, route=r.route, stage=r.stage, nz=r.nz, ok=r.ok,
                     singular=r.singular, tau2=r.tau2, fail_reason=r.fail_reason)
@@ -120,8 +162,26 @@ class NormativeModelEngineMixed:
             rec = self.genes.get(g)
             if rec is None or not rec.ok:
                 continue
+            if rec.route == "pool":
+                # Shared-beta pooled GLM: log(mu) = log(mean_hc+eps) + Xa @ beta
+                # (fit_pooled_glmm's offset + fixed-effect formula). No random-batch
+                # marginalization here -- fit_pooled_glmm doesn't return tau2 (out of
+                # this fix's scope; see judgment-call note in the fix report).
+                mu = np.clip((rec.mean_hc + self.rare_glm["eps"]) * np.exp(Xa @ self.rare_glm["beta"]), 1e-6, 1e8)
+                if self.rare_glm["family"] == "poisson":
+                    Z[:, j] = _poisson_rqr(Y_test[:, j].astype(np.float64), mu, seed + j)
+                else:
+                    Z[:, j] = marginal_nb_rqr(Y_test[:, j].astype(np.float64), mu, self.rare_glm["alpha"], 0.0, seed + j)
+                continue
             mu = np.clip(np.exp(Xa @ np.nan_to_num(rec.mu_coef, nan=0.0)), 1e-6, 1e8)
-            alpha = np.exp(-rec.disp_coef[0]) if not np.isnan(rec.disp_coef[0]) else self.alpha_fn(float(mu.mean()))
+            # Full per-sample linear predictor (intercept + covariate slopes), not just
+            # the intercept -- sigma_glmmtmb(x) = exp(-X @ disp_coef), verified sign
+            # convention from the Step 0 spike (task-4-report.md). Using disp_coef[0]
+            # alone silently flattened dispersion for every stage-nbi gene.
+            if not np.all(np.isnan(rec.disp_coef)):
+                alpha = np.exp(-Xa @ np.nan_to_num(rec.disp_coef, nan=0.0))
+            else:
+                alpha = np.full(len(X_test), self.alpha_fn(float(mu.mean())))
             Z[:, j] = marginal_nb_rqr(Y_test[:, j].astype(np.float64), mu, alpha, rec.tau2, seed + j)
         return Z if not as_dict else {"combined": Z, "gene_names": list(gene_names)}
 
@@ -129,6 +189,8 @@ class NormativeModelEngineMixed:
         directory = Path(directory); directory.mkdir(parents=True, exist_ok=True)
         with open(directory / "genes.pkl", "wb") as f: pickle.dump(self.genes, f)
         with open(directory / "scaler.pkl", "wb") as f: pickle.dump(self.scaler, f)
+        if self.rare_glm is not None:
+            with open(directory / "rare_glm.pkl", "wb") as f: pickle.dump(self.rare_glm, f)
         self.training_summary().to_csv(directory / "training_summary.csv")
 
     @classmethod
@@ -137,5 +199,8 @@ class NormativeModelEngineMixed:
         engine = cls()
         with open(directory / "genes.pkl", "rb") as f: engine.genes = pickle.load(f)
         with open(directory / "scaler.pkl", "rb") as f: engine.scaler = pickle.load(f)
+        rare_glm_path = directory / "rare_glm.pkl"
+        if rare_glm_path.exists():
+            with open(rare_glm_path, "rb") as f: engine.rare_glm = pickle.load(f)
         engine.alpha_fn = load_trend()
         return engine
