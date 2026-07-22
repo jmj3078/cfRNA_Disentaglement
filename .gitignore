@@ -12,3 +12,4 @@
 *.csv
 *.log
 *.parquet
+*.csv.gz
