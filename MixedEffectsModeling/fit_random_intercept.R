@@ -25,10 +25,13 @@ priors_df <- if (use_priors) data.frame(prior = "normal(0, 0.05)", class = "beta
 # Python config are kept fully separate by design in this spike, so this is duplicated here.
 BETA_EXPLODE_THR <- 3.0
 
-# Symmetric cutoff on the variance scale: tau2 is Var(b) on the log(mu) link, so
-# sd(b) >= BETA_EXPLODE_THR is as implausible for a random intercept as a fixed-effect
-# coefficient of the same magnitude would be (sd(b)=3 already implies e^{+-6}-fold
-# batch swings; tau2=9 is the point at which we stop trusting the estimate at all).
+# Reused threshold, not a separately derived one: BETA_EXPLODE_THR is calibrated as a
+# regression-slope explosion check (log(mu) change per SD of a standardized covariate),
+# which is not the same quantity as a random-intercept's total spread (sd(b)). Squaring
+# it to get a tau2 cutoff is a convenience borrow -- picking the project's one existing
+# "implausible magnitude" convention for consistency -- not a statistically derived bound.
+# sd(b)=3 already implies e^{+-6}-fold batch swings, which is implausible enough on its
+# own to justify treating tau2 >= 9 as non-identifiable regardless of the exact number.
 TAU2_MAX <- BETA_EXPLODE_THR^2
 
 # Principled convergence/singularity check based on TMB's own positive-definite-Hessian
