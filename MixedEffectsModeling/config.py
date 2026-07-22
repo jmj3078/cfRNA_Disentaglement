@@ -43,4 +43,8 @@ SPIKE_PARAMS = {
     "gaic_k": 2.0,
     "n_pilot_genes": 40,
     "seed": 42,
+    "trend_min_nz": 30,
+    "alpha_floor": 1e-2,
+    "alpha_cap": 50.0,
+    "n_splits": 5,
 }

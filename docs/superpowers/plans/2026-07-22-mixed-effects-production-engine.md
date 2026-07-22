@@ -2,7 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the production mixed-effects (batch random-intercept) normative engine in `Modeling/`, replacing per-gene rpy2 calls with a one-pass R-native cascade.
+**Goal:** Build the production mixed-effects (batch random-intercept) normative engine, replacing per-gene rpy2 calls with a one-pass R-native cascade.
+
+**Isolation revised 2026-07-23 (user directive, mid-execution):** everything lives in `MixedEffectsModeling/`, not `Modeling/` -- zero overlap with the existing production framework. Where existing `Modeling/` logic is genuinely needed (dispersion trend fitting, `_nb_rqr`/`_w1_normal` helpers), copy it in as a duplicate file/function with a comment citing the source, never `import`/`source` across the two directories. Tasks 1-3 were originally built in `Modeling/` before this directive landed; they were moved (`git mv`) into `MixedEffectsModeling/` and root `config.py`'s additions were reverted in favor of `MixedEffectsModeling/config.py` -- see that commit for the exact diff. Every task below already reflects the corrected `MixedEffectsModeling/` paths.
 
 **Architecture:** Python writes HC data to disk; R (`glmm_helpers.R` + `glmm_fit.R`) fits everything via `mclapply`, one subprocess call per run; Python reads results back and does all scoring (marginal Gauss-Hermite RQR) in pure Python.
 
@@ -13,8 +15,8 @@
 ## Global Constraints
 
 - No type hints on Python function signatures. No artificial alignment whitespace. English-only comments, minimal (one line, WHY only). Alphabetical imports.
-- All new files in `Modeling/`. `Modeling/gamlss.r` untouched (still used by the existing v2 engine).
-- New output dirs, never overwrite existing production artifacts: `Modeling/engine_state_mixed/`, `Modeling/CV_Results_mixed/`, `Modeling/Threshold_Sweep/`.
+- All new files in `MixedEffectsModeling/`. Zero imports/`source()` calls into `Modeling/` -- copy needed logic in as a duplicate, cited with a comment.
+- New output dirs, never overwrite existing production artifacts: `MixedEffectsModeling/engine_state_mixed/`, `MixedEffectsModeling/CV_Results_mixed/`, `MixedEffectsModeling/Threshold_Sweep/`.
 - `mclapply` cores: `min(parallel::detectCores() - 1, 8)`.
 - Reuse `MixedEffectsModeling/Spike_Results/` (40-gene pilot, already-validated `is_converged()` semantics) as the regression fixture — do not modify anything under `MixedEffectsModeling/`.
 - `nz_a_max` decision is DEFERRED (see ordering note above) -- do not auto-run `pool_threshold_sweep.py`'s pick as part of this pass. Build it, don't execute the decision.
@@ -24,7 +26,9 @@
 
 ---
 
-### Task 1: config.py additions
+### Task 1: config.py additions — COMPLETE, superseded by the isolation move
+
+**Superseded 2026-07-23:** this task's code below added paths to root `config.py`. That was reverted; the equivalent paths now live in `MixedEffectsModeling/config.py` instead (see the isolation-move commit). Left here for history only — do not redo this task.
 
 **Files:**
 - Modify: `config.py` (append near existing `ENGINE_DIR`/`CV_RESULTS_DIR` block, config.py:26-37)
@@ -61,10 +65,10 @@ git commit -m "Add config paths for mixed-effects production engine outputs"
 
 ---
 
-### Task 2: `Modeling/glmm_helpers.R` — shared R fitting logic
+### Task 2: `MixedEffectsModeling/glmm_helpers.R` — shared R fitting logic
 
 **Files:**
-- Create: `Modeling/glmm_helpers.R`
+- Create: `MixedEffectsModeling/glmm_helpers.R`
 
 **Interfaces:**
 - Produces: `sanitize_names(names)`, `safe_max_abs(x)`, `is_converged(fit, beta_explode_thr, tau2_max)` (returns `list(ok, singular, tau2)`), `fit_stage_gene(y, X_safe_names, X, batch, stage, fixed_log_theta, priors_df, beta_explode_thr, tau2_max)` (returns `list(stage, ok, singular, tau2, mu_coef, disp_coef, fail_reason)`), `fit_pooled_glmm(Y_block, X, batch, mean_hc, eps, rare_overdisp_thr)` (returns `list(family, beta, alpha, mult_lo, mult_hi, ok)`).
@@ -171,7 +175,7 @@ fit_pooled_glmm <- function(Y_block, X, batch, mean_hc, eps, rare_overdisp_thr) 
 ```bash
 cd /project/cfRNA_NormativeModeling/MixedEffectsModeling
 Rscript -e '
-source("../Modeling/glmm_helpers.R")
+source("../MixedEffectsModeling/glmm_helpers.R")
 X <- as.matrix(read.csv("Spike_Results/pilot_X.csv.gz", row.names=1))
 Y <- read.csv("Spike_Results/pilot_Y.csv.gz", row.names=1)
 batch <- read.csv("Spike_Results/pilot_batch.csv.gz", row.names=1)$Batch_ID
@@ -186,19 +190,19 @@ Expected: prints `PASS` and a list with `stage="nbi"`, `ok` TRUE/FALSE, no R err
 - [ ] **Step 3: Commit**
 
 ```bash
-git add Modeling/glmm_helpers.R
+git add MixedEffectsModeling/glmm_helpers.R
 git commit -m "Add shared R fitting helpers for the mixed-effects cascade"
 ```
 
 ---
 
-### Task 3: `Modeling/glmm_fit.R` — cascade CLI
+### Task 3: `MixedEffectsModeling/glmm_fit.R` — cascade CLI
 
 **Files:**
-- Create: `Modeling/glmm_fit.R`
+- Create: `MixedEffectsModeling/glmm_fit.R`
 
 **Interfaces:**
-- Consumes: `Modeling/glmm_helpers.R` (Task 2).
+- Consumes: `MixedEffectsModeling/glmm_helpers.R` (Task 2).
 - CLI args: `--x <csv.gz> --y <csv.gz> --batch <csv.gz> --genes <csv, gene+stage col> --trend <json> --mode <cascade|fixed_stage> --out <csv> --chunk-size <int> --cores <int>`.
   `--mode cascade`: try nbi->nbi_disp_intercept->nb_fixed->intercept per gene (training). `--mode fixed_stage`: fit only the stage given in `--genes`' `stage` column (CV re-fit per fold).
 - Produces: one CSV row per gene: `gene,stage,ok,singular,tau2,mu_coef_0..10,disp_coef_0..10,fail_reason`. Written incrementally per chunk (resumable: skip genes already present in an existing `--out` file).
@@ -292,7 +296,7 @@ import pandas as pd
 g = pd.read_csv('Spike_Results/pilot_genes.csv')[['gene']]
 g.to_csv('/tmp/pilot_genes_nbi.csv', index=False)
 "
-Rscript ../Modeling/glmm_fit.R --x Spike_Results/pilot_X.csv.gz --y Spike_Results/pilot_Y.csv.gz \
+Rscript ../MixedEffectsModeling/glmm_fit.R --x Spike_Results/pilot_X.csv.gz --y Spike_Results/pilot_Y.csv.gz \
   --batch Spike_Results/pilot_batch.csv.gz --genes /tmp/pilot_genes_nbi.csv \
   --trend Spike_Results/dummy_trend.json --mode cascade --out /tmp/pilot_cascade_out.csv --chunk-size 40
 ```
@@ -301,7 +305,7 @@ Expected: `DONE` printed, `/tmp/pilot_cascade_out.csv` has 40 rows. `--trend` ne
 - [ ] **Step 3: Commit**
 
 ```bash
-git add Modeling/glmm_fit.R
+git add MixedEffectsModeling/glmm_fit.R
 git commit -m "Add glmm_fit.R production cascade CLI (nbi->nbi_disp_intercept->nb_fixed->intercept)"
 ```
 
@@ -310,10 +314,10 @@ git commit -m "Add glmm_fit.R production cascade CLI (nbi->nbi_disp_intercept->n
 ### Task 4: Spike-pilot regression fixture
 
 **Files:**
-- Create: `Modeling/test_glmm_fit_regression.py`
+- Create: `MixedEffectsModeling/test_glmm_fit_regression.py`
 
 **Interfaces:**
-- Consumes: `Modeling/glmm_fit.R` (Task 3), `MixedEffectsModeling/Spike_Results/*` (read-only).
+- Consumes: `MixedEffectsModeling/glmm_fit.R` (Task 3), `MixedEffectsModeling/Spike_Results/*` (read-only).
 - Verifies: running `glmm_fit.R --mode fixed_stage` with every pilot gene fixed to stage `"nbi"` reproduces the spike's `random_intercept_fits.csv` `tau2`/`singular`/`ok` outcomes exactly (same formula, same `is_converged`, same data — only the code path differs).
 
 - [ ] **Step 1: Write the script**
@@ -326,7 +330,7 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import config
+import MixedEffectsModeling.config as config
 
 SPIKE_DIR = Path(__file__).resolve().parent.parent / "MixedEffectsModeling" / "Spike_Results"
 OUT = Path("/tmp/glmm_fit_regression_out.csv")
@@ -342,7 +346,7 @@ subprocess.run([
     "--x", str(SPIKE_DIR / "pilot_X.csv.gz"), "--y", str(SPIKE_DIR / "pilot_Y.csv.gz"),
     "--batch", str(SPIKE_DIR / "pilot_batch.csv.gz"), "--genes", str(genes_path),
     "--trend", str(config.DISPERSION_TREND_PATH), "--mode", "fixed_stage", "--out", str(OUT),
-], check=True, cwd=str(config.MODELING_DIR))
+], check=True, cwd=str(config.GLMM_FIT_R.parent))
 
 new = pd.read_csv(OUT).set_index("gene")
 old = pd.read_csv(SPIKE_DIR / "random_intercept_fits.csv").set_index("gene")
@@ -359,29 +363,29 @@ assert len(common) == 40, f"expected 40 common genes, got {len(common)}"
 assert not mismatches, f"FAIL: {len(mismatches)} genes diverged from spike: {mismatches}"
 print(f"PASS: all {len(common)} pilot genes match spike outcomes (ok+tau2)")
 ```
-Note: this requires `config.DISPERSION_TREND_PATH` (the real production Phase-0 trend, built from full HC data) to exist. If it doesn't yet, run `python -c "from Modeling.model_engine import NormativeModelEngine as E; e=E(); e.load_hc_data(); e.build_dispersion_trend()"` first, or point `--trend` at any valid trend JSON — the regression check only needs `alpha_of` to return a positive number per gene, it doesn't need to match the spike's own dispersion values (the spike's stage was `nbi`, whose dispersion is covariate-regressed, not trend-derived).
+Note: this requires `config.DISPERSION_TREND_PATH` (the real production Phase-0 trend, built from full HC data) to exist. If it doesn't yet, run `python -c "from MixedEffectsModeling.model_engine_mixed import NormativeModelEngineMixed as E; e=E(); e.load_hc_data(); e.build_dispersion_trend()"` first, or point `--trend` at any valid trend JSON — the regression check only needs `alpha_of` to return a positive number per gene, it doesn't need to match the spike's own dispersion values (the spike's stage was `nbi`, whose dispersion is covariate-regressed, not trend-derived).
 
 - [ ] **Step 2: Run it**
 
 ```bash
 cd /project/cfRNA_NormativeModeling
-python Modeling/test_glmm_fit_regression.py
+python MixedEffectsModeling/test_glmm_fit_regression.py
 ```
-Expected: `PASS: all 40 pilot genes match spike outcomes (ok+tau2)`. A mismatch here means `glmm_fit.R`'s `nbi` formula/priors diverged from the spike's validated version — compare `Modeling/glmm_helpers.R`'s `nbi` row against `MixedEffectsModeling/fit_random_intercept.R` line by line before proceeding to any full run.
+Expected: `PASS: all 40 pilot genes match spike outcomes (ok+tau2)`. A mismatch here means `glmm_fit.R`'s `nbi` formula/priors diverged from the spike's validated version — compare `MixedEffectsModeling/glmm_helpers.R`'s `nbi` row against `MixedEffectsModeling/fit_random_intercept.R` line by line before proceeding to any full run.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add Modeling/test_glmm_fit_regression.py
+git add MixedEffectsModeling/test_glmm_fit_regression.py
 git commit -m "Add spike-pilot regression fixture for glmm_fit.R"
 ```
 
 ---
 
-### Task 5: `Modeling/marginal_rqr.py` — pure-Python marginal scoring
+### Task 5: `MixedEffectsModeling/marginal_rqr.py` — pure-Python marginal scoring
 
 **Files:**
-- Create: `Modeling/marginal_rqr.py`
+- Create: `MixedEffectsModeling/marginal_rqr.py`
 
 **Interfaces:**
 - Produces: `marginal_nb_rqr(y, mu, alpha, tau2, seed, n_nodes=7)` — marginal RQR integrating `b ~ N(0, tau2)` via Gauss-Hermite quadrature into the NB CDF; falls back to the existing `_nb_rqr` (point-mass) when `tau2 < 1e-6`.
@@ -402,10 +406,23 @@ def _nb_cdf(y, mu, alpha):
     return nbinom.cdf(y, n, p)
 
 
+# Copied from Modeling/model_engine.py's _nb_rqr (point-mass NB RQR fallback
+# for tau2~=0) -- MixedEffectsModeling stays fully independent of Modeling/,
+# so this is a duplicate, not an import, per the isolation requirement.
+def _nb_rqr(y, mu, alpha, seed=None):
+    y = np.asarray(y)
+    n = 1.0 / alpha
+    p = np.clip(n / (n + mu), RQR_EPS, 1 - RQR_EPS)
+    lo = np.where(y > 0, nbinom.cdf(y - 1, n, p), 0.0)
+    hi = nbinom.cdf(y, n, p)
+    lo = np.clip(lo, RQR_EPS, 1 - RQR_EPS); hi = np.clip(hi, RQR_EPS, 1 - RQR_EPS)
+    rng = np.random.default_rng(seed)
+    return norm.ppf(rng.uniform(np.minimum(lo, hi), np.maximum(lo, hi))).astype(np.float32)
+
+
 def marginal_nb_rqr(y, mu, alpha, tau2, seed, n_nodes=7):
     y = np.asarray(y)
     if tau2 < 1e-6:
-        from model_engine import _nb_rqr
         return _nb_rqr(y, mu, alpha, seed)
 
     nodes, weights = hermegauss(n_nodes)  # integrate against exp(-x^2/2), matches N(0,1)
@@ -426,7 +443,7 @@ def marginal_nb_rqr(y, mu, alpha, tau2, seed, n_nodes=7):
 - [ ] **Step 2: Verify against Monte Carlo**
 
 ```bash
-cd /project/cfRNA_NormativeModeling/Modeling
+cd /project/cfRNA_NormativeModeling/MixedEffectsModeling
 python -c "
 import numpy as np
 from scipy.stats import nbinom
@@ -449,7 +466,7 @@ Expected: `PASS: marginal RQR calibrated on Monte Carlo NB-mixture data`. If it 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add Modeling/marginal_rqr.py
+git add MixedEffectsModeling/marginal_rqr.py
 git commit -m "Add pure-Python marginal RQR (Gauss-Hermite quadrature over batch random intercept)"
 ```
 
@@ -458,10 +475,10 @@ git commit -m "Add pure-Python marginal RQR (Gauss-Hermite quadrature over batch
 ### Task 6a: Full unconstrained cascade run + EDA (no pool-route gating)
 
 **Files:**
-- Create: `Modeling/run_glmm_full_unconstrained.py`, `Modeling/eda_glmm_full_unconstrained.py`
+- Create: `MixedEffectsModeling/run_glmm_full_unconstrained.py`, `MixedEffectsModeling/eda_glmm_full_unconstrained.py`
 
 **Interfaces:**
-- Consumes: `Modeling/glmm_fit.R` (Task 3).
+- Consumes: `MixedEffectsModeling/glmm_fit.R` (Task 3).
 - Produces: `Modeling/Threshold_Sweep/full_cascade_unconstrained.csv` (every protein-coding HC gene, `--mode cascade`, no NZ filtering at all -- every gene attempts nbi->...->intercept regardless of NZ), and `Threshold_Sweep/Figures/nz_vs_stage_tau2.png` (per-NZ-bin: stage composition, `ok` rate, median `tau2` -- mirrors `EDA_Modeling/pooling_nz_sweep.py`'s plot style, but no threshold line drawn yet since none is chosen).
 
 - [ ] **Step 1: Write `run_glmm_full_unconstrained.py`** (loads full HC data exactly like `Modeling/model_engine.py:load_hc_data`, writes it once, calls `glmm_fit.R --mode cascade` over every protein-coding gene with no NZ pre-filter)
@@ -478,7 +495,7 @@ from scipy.sparse import issparse
 from sklearn.preprocessing import StandardScaler
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import config
+import MixedEffectsModeling.config as config
 
 TMP = Path("/tmp/glmm_full_unconstrained")
 TMP.mkdir(exist_ok=True)
@@ -508,14 +525,14 @@ def main():
     print(f"HC={Xs.shape[0]}  genes={len(names)}  batches={len(set(batch))}")
 
     if not config.DISPERSION_TREND_PATH.exists():
-        raise SystemExit("Build the Phase-0 trend first (see existing Modeling/model_engine.py:build_dispersion_trend)")
+        raise SystemExit("Build the Phase-0 trend first (see MixedEffectsModeling/model_engine_mixed.py:build_dispersion_trend)")
 
     subprocess.run([
         "Rscript", str(config.GLMM_FIT_R), "--x", str(TMP / "X.csv.gz"), "--y", str(TMP / "Y.csv.gz"),
         "--batch", str(TMP / "batch.csv.gz"), "--genes", str(TMP / "genes.csv"),
         "--trend", str(config.DISPERSION_TREND_PATH), "--mode", "cascade", "--out", str(OUT),
         "--chunk-size", "200", "--cores", str(min(8, 8)),
-    ], check=True, cwd=str(config.MODELING_DIR))
+    ], check=True, cwd=str(config.GLMM_FIT_R.parent))
     print(f"Saved -> {OUT}")
 
 
@@ -533,7 +550,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import config
+import MixedEffectsModeling.config as config
 from viz_style import apply_style
 
 OUT = config.THRESHOLD_SWEEP_DIR
@@ -573,27 +590,27 @@ The full run is on ~19,538 genes (design spec's core-hour estimate applies) -- s
 
 ```bash
 cd /project/cfRNA_NormativeModeling
-python Modeling/run_glmm_full_unconstrained.py
-python Modeling/eda_glmm_full_unconstrained.py
+python MixedEffectsModeling/run_glmm_full_unconstrained.py
+python MixedEffectsModeling/eda_glmm_full_unconstrained.py
 ```
 Expected: prints the per-NZ-bin summary table, saves the CSV and figure. This is descriptive output for the user to review later -- do not pick or hardcode an `nz_a_max` from it as part of this task.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add Modeling/run_glmm_full_unconstrained.py Modeling/eda_glmm_full_unconstrained.py
+git add MixedEffectsModeling/run_glmm_full_unconstrained.py MixedEffectsModeling/eda_glmm_full_unconstrained.py
 git commit -m "Add full unconstrained cascade run + NZ-trend EDA (no pooling threshold decided)"
 ```
 
 ---
 
-### Task 6b: `Modeling/pool_threshold_sweep.R` + `.py`
+### Task 6b: `MixedEffectsModeling/pool_threshold_sweep.R` + `.py`
 
 **Files:**
-- Create: `Modeling/pool_threshold_sweep.R`, `Modeling/pool_threshold_sweep.py`
+- Create: `MixedEffectsModeling/pool_threshold_sweep.R`, `MixedEffectsModeling/pool_threshold_sweep.py`
 
 **Interfaces:**
-- Consumes: `Modeling/glmm_helpers.R`'s `fit_pooled_glmm` (Task 2).
+- Consumes: `MixedEffectsModeling/glmm_helpers.R`'s `fit_pooled_glmm` (Task 2).
 - Produces: `Threshold_Sweep/pool_threshold_sweep_summary.csv` (`nz_threshold,n_genes,w1_median,w1_p90`), `Threshold_Sweep/Figures/pool_threshold_sweep.png`, and prints the auto-picked `nz_a_max`.
 
 - [ ] **Step 1: Write `pool_threshold_sweep.R`** (one process, loops NZ thresholds x folds internally to avoid repeated R startup cost)
@@ -662,10 +679,10 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import config
+import MixedEffectsModeling.config as config
 from viz_style import apply_style
 
-MP = config.MODELING_PARAMS
+MP = config.SPIKE_PARAMS
 OUT = config.THRESHOLD_SWEEP_DIR
 OUT.mkdir(parents=True, exist_ok=True)
 config.THRESHOLD_SWEEP_FIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -710,7 +727,7 @@ def main():
             "--x", "/tmp/pool_sweep_X.csv.gz", "--y", "/tmp/pool_sweep_Y.csv.gz",
             "--batch", "/tmp/pool_sweep_batch.csv.gz", "--folds", "/tmp/pool_sweep_folds.csv",
             "--out", str(summary_path),
-        ], check=True, cwd=str(config.MODELING_DIR))
+        ], check=True, cwd=str(config.GLMM_FIT_R.parent))
         summary = pd.read_csv(summary_path)
 
     print(summary.round(3).to_string(index=False))
@@ -755,23 +772,26 @@ Expected: prints HC shape (should be `(693, 10)` and `(693, ~19538)` matching th
 
 ```bash
 cd /project/cfRNA_NormativeModeling
-python Modeling/pool_threshold_sweep.py
-git add Modeling/pool_threshold_sweep.R Modeling/pool_threshold_sweep.py
+python MixedEffectsModeling/pool_threshold_sweep.py
+git add MixedEffectsModeling/pool_threshold_sweep.R MixedEffectsModeling/pool_threshold_sweep.py
 git commit -m "Add pool threshold sweep (batch random-intercept), auto-picks nz_a_max"
 ```
 
 ---
 
-### Task 7: `Modeling/model_engine_mixed.py` — orchestration
+### Task 7: `MixedEffectsModeling/model_engine_mixed.py` — orchestration
 
 **Files:**
-- Create: `Modeling/model_engine_mixed.py`
+- Create: `MixedEffectsModeling/model_engine_mixed.py`
+- Create: `MixedEffectsModeling/dispersion_trend.py` (copy-paste of `Modeling/dispersion_trend.py`'s `build_trend`/`save_trend`/`load_trend`/`weighted_median`, adapted to import `MixedEffectsModeling.config` instead of root `config` and read `SPIKE_PARAMS["trend_min_nz"/"alpha_floor"/"alpha_cap"]` — a duplicate, not an import, per the isolation requirement; do not `import` or `source` anything under `Modeling/` from this file)
 
 **Interfaces:**
-- Consumes: `config.GLMM_FIT_R`, `config.POOL_SWEEP_R`'s output (`Threshold_Sweep/nz_a_max.txt`), `Modeling/marginal_rqr.py`.
-- Produces: `NormativeModelEngineMixed` class with `load_hc_data()`, `assign_routes()` (reads `nz_a_max.txt`), `train()` (writes HC data to temp files, calls `glmm_fit.R --mode cascade` once, calls `fit_pooled_glmm` for the pool route via a small dedicated R call), `score(X_test_raw, Y_test, gene_names=None, seed=42, as_dict=False)` (same contract as `Modeling/model_engine.py`'s `score()`, uses `marginal_nb_rqr` for stages with `tau2>1e-6`), `save(directory)`/`load(directory)` writing to `config.ENGINE_MIXED_DIR`.
+- Consumes: `config.GLMM_FIT_R`, `config.POOL_SWEEP_R`'s output (`Threshold_Sweep/nz_a_max.txt`), `MixedEffectsModeling/marginal_rqr.py`, `MixedEffectsModeling/dispersion_trend.py` (this task's own copy).
+- Produces: `NormativeModelEngineMixed` class with `load_hc_data()`, `assign_routes()` (reads `nz_a_max.txt`), `train()` (writes HC data to temp files, calls `glmm_fit.R --mode cascade` once, calls `fit_pooled_glmm` for the pool route via a small dedicated R call), `score(X_test_raw, Y_test, gene_names=None, seed=42, as_dict=False)` (`marginal_nb_rqr` for stages with `tau2>1e-6`), `save(directory)`/`load(directory)` writing to `config.ENGINE_MIXED_DIR`.
 
-- [ ] **Step 1: Write the class** (mirrors `Modeling/model_engine.py`'s `NormativeModelEngine` structure — same `load_hc_data`, same `GeneRecord`-style dataclass extended with `tau2`/`batch_glmm_singular`, same `save`/`load`/`training_summary` shape — but `train()` delegates fitting to one `glmm_fit.R` subprocess call instead of per-gene R calls)
+- [ ] **Step 1: Write `dispersion_trend.py`** — copy `Modeling/dispersion_trend.py` verbatim (read it first) with two changes: `import MixedEffectsModeling.config as config` instead of `import config`, and `MP = config.SPIKE_PARAMS` instead of `MP = config.MODELING_PARAMS`. Everything else (the `weighted_median`/`build_trend`/`save_trend`/`load_trend` functions) is unchanged.
+
+- [ ] **Step 2: Write `model_engine_mixed.py`** (same overall shape as `Modeling/model_engine.py`'s `NormativeModelEngine` — same `load_hc_data`, same `GeneRecord`-style dataclass extended with `tau2`/`batch_glmm_singular`, same `save`/`load`/`training_summary` shape, described here for reference only, do not import from it — but `train()` delegates fitting to one `glmm_fit.R` subprocess call instead of per-gene R calls, and everything imports from this task's own `MixedEffectsModeling.dispersion_trend`, never `Modeling/`)
 
 ```python
 import pickle
@@ -787,11 +807,11 @@ from scipy.sparse import issparse
 from sklearn.preprocessing import StandardScaler
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import config
-from dispersion_trend import build_trend, load_trend, save_trend
-from marginal_rqr import marginal_nb_rqr
+import MixedEffectsModeling.config as config
+from MixedEffectsModeling.dispersion_trend import build_trend, load_trend, save_trend
+from MixedEffectsModeling.marginal_rqr import marginal_nb_rqr
 
-MP = config.MODELING_PARAMS
+MP = config.SPIKE_PARAMS
 
 
 @dataclass
@@ -869,7 +889,7 @@ class NormativeModelEngineMixed:
             "Rscript", str(config.GLMM_FIT_R), "--x", f"{tmp_dir}/X.csv.gz", "--y", f"{tmp_dir}/Y.csv.gz",
             "--batch", f"{tmp_dir}/batch.csv.gz", "--genes", f"{tmp_dir}/genes.csv",
             "--trend", str(config.DISPERSION_TREND_PATH), "--mode", "cascade", "--out", f"{tmp_dir}/results.csv",
-        ], check=True, cwd=str(config.MODELING_DIR))
+        ], check=True, cwd=str(config.GLMM_FIT_R.parent))
 
         results = pd.read_csv(f"{tmp_dir}/results.csv").set_index("gene")
         for g, row in results.iterrows():
@@ -917,12 +937,12 @@ class NormativeModelEngineMixed:
         return engine
 ```
 
-- [ ] **Step 2: Smoke-test with `--limit`-equivalent (20 genes)**
+- [ ] **Step 3: Smoke-test with `--limit`-equivalent (20 genes)**
 
 ```bash
 cd /project/cfRNA_NormativeModeling
 python -c "
-from Modeling.model_engine_mixed import NormativeModelEngineMixed
+from MixedEffectsModeling.model_engine_mixed import NormativeModelEngineMixed
 e = NormativeModelEngineMixed()
 e.load_hc_data()
 e.build_dispersion_trend()
@@ -935,22 +955,22 @@ print('PASS: smoke-trained 20 genes')
 ```
 Expected: `PASS: smoke-trained 20 genes`. Requires Task 6's `nz_a_max.txt` to already exist.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add Modeling/model_engine_mixed.py
+git add MixedEffectsModeling/model_engine_mixed.py MixedEffectsModeling/dispersion_trend.py
 git commit -m "Add NormativeModelEngineMixed orchestration + marginal scoring"
 ```
 
 ---
 
-### Task 8: `Modeling/cv_glmm_engine.py`
+### Task 8: `MixedEffectsModeling/cv_glmm_engine.py`
 
 **Files:**
-- Create: `Modeling/cv_glmm_engine.py`
+- Create: `MixedEffectsModeling/cv_glmm_engine.py`
 
 **Interfaces:**
-- Consumes: `Modeling/model_engine_mixed.py` (Task 7, for `load_hc_data`), `config.GLMM_FIT_R` in `--mode fixed_stage`.
+- Consumes: `MixedEffectsModeling/model_engine_mixed.py` (Task 7, for `load_hc_data`), `config.GLMM_FIT_R` in `--mode fixed_stage`.
 - Produces: `CV_Results_mixed/cv_stats.csv` (same columns as `Modeling/cv_model_engine.py`'s: `gene,route,stage,nz,w1,mean_z,std_z,skew_z,kurt_z,n_valid`).
 
 - [ ] **Step 1: Write the script** (same 5-fold stratified structure as `Modeling/cv_model_engine.py`, but each fold's fit is one `glmm_fit.R --mode fixed_stage` subprocess call over all genes assigned to that fold, not per-gene rpy2)
@@ -965,14 +985,24 @@ import pandas as pd
 from scipy.stats import kurtosis, skew
 from sklearn.model_selection import StratifiedKFold
 
-sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import config
-from marginal_rqr import marginal_nb_rqr
-from model_engine import _w1_normal
-from model_engine_mixed import NormativeModelEngineMixed
+import MixedEffectsModeling.config as config
+from MixedEffectsModeling.marginal_rqr import marginal_nb_rqr
+from MixedEffectsModeling.model_engine_mixed import NormativeModelEngineMixed
+from scipy.stats import norm
 
-MP = config.MODELING_PARAMS
+MP = config.SPIKE_PARAMS
+
+
+# Copied from Modeling/model_engine.py's _w1_normal (mean abs deviation vs
+# theoretical N(0,1) quantiles) -- duplicate, not an import, per isolation.
+def _w1_normal(z):
+    v = z[np.isfinite(z)]
+    n = len(v)
+    if n < 8:
+        return np.nan
+    ref = norm.ppf(np.linspace(1 / (2 * n), 1 - 1 / (2 * n), n))
+    return float(np.mean(np.abs(np.sort(v) - ref)))
 
 
 def main():
@@ -1002,7 +1032,7 @@ def main():
             "Rscript", str(config.GLMM_FIT_R), "--x", f"{tmp}/X_{fi}.csv.gz", "--y", f"{tmp}/Y_{fi}.csv.gz",
             "--batch", f"{tmp}/batch_{fi}.csv.gz", "--genes", f"{tmp}/genes_{fi}.csv",
             "--trend", str(config.DISPERSION_TREND_PATH), "--mode", "fixed_stage", "--out", f"{tmp}/res_{fi}.csv",
-        ], check=True, cwd=str(config.MODELING_DIR))
+        ], check=True, cwd=str(config.GLMM_FIT_R.parent))
 
         fold_fits = pd.read_csv(f"{tmp}/res_{fi}.csv").set_index("gene")
         Xa_te = np.column_stack([np.ones(len(te)), e2.X_hc_scaled[te]])
@@ -1058,7 +1088,7 @@ Then temporarily point `cv_glmm_engine.py`'s `summary` read at `/tmp/cv_smoke_su
 - [ ] **Step 3: Commit**
 
 ```bash
-git add Modeling/cv_glmm_engine.py
+git add MixedEffectsModeling/cv_glmm_engine.py
 git commit -m "Add cv_glmm_engine.py (5-fold CV, per-fold R refit, marginal scoring)"
 ```
 
@@ -1075,8 +1105,8 @@ cd /project/cfRNA_NormativeModeling
 python -c "
 import pickle
 import pandas as pd
-from Modeling.model_engine_mixed import GeneRecordMixed
-import config
+from MixedEffectsModeling.model_engine_mixed import GeneRecordMixed
+import MixedEffectsModeling.config as config
 
 df = pd.read_csv(config.THRESHOLD_SWEEP_DIR / 'full_cascade_unconstrained.csv').set_index('gene')
 genes = {}
@@ -1101,7 +1131,7 @@ Expected: prints an `ok` rate and stage-count breakdown for all HC protein-codin
 
 ```bash
 cd /project/cfRNA_NormativeModeling
-python Modeling/cv_glmm_engine.py
+python MixedEffectsModeling/cv_glmm_engine.py
 ```
 Expected: completes (may take hours per the design spec's core-hour estimate x5 folds), `Saved -> Modeling/CV_Results_mixed/cv_stats.csv`, per-stage median `w1` printed (values near the existing engine's calibration are the target, not a hard gate — report whatever is observed).
 
