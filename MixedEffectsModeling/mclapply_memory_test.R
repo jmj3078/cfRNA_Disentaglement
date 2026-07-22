@@ -75,11 +75,17 @@ cat("Wrote Spike_Results/mclapply_memory_log.csv (per-call, per-PID granularity)
 
 # Per-PID RSS growth: only PIDs that handled >1 gene in sequence within the
 # same persistent fork can show accumulation (mc.preschedule=FALSE forks
-# fresh per item, so growth there must be ~0 by construction).
+# fresh per item, so growth there must be ~0 by construction). Group by
+# (chunk, pid), not pid alone -- each chunk is a fresh mclapply() call, so a
+# fork lifetime never spans a chunk boundary, but the OS could in principle
+# reuse the same PID number across two different chunks' forks. Grouping by
+# pid alone would silently merge those two unrelated fork lifetimes and
+# difference across them, corrupting the growth number with no warning.
 per_pid_growth <- function(call_log) {
   max_growth <- 0
-  for (pid in unique(call_log$pid)) {
-    sub <- call_log[call_log$pid == pid, ]
+  call_log$group_key <- paste(call_log$chunk, call_log$pid, sep = "_")
+  for (key in unique(call_log$group_key)) {
+    sub <- call_log[call_log$group_key == key, ]
     sub <- sub[order(sub$call_order), ]
     if (nrow(sub) > 1) {
       growth <- sub$rss_mb[nrow(sub)] - sub$rss_mb[1]
