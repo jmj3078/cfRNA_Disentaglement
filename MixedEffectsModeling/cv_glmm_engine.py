@@ -9,6 +9,7 @@ from sklearn.model_selection import StratifiedKFold
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import MixedEffectsModeling.config as config
+from MixedEffectsModeling.dispersion_trend import load_trend
 from MixedEffectsModeling.marginal_rqr import marginal_nb_rqr
 from MixedEffectsModeling.model_engine_mixed import NormativeModelEngineMixed
 
@@ -35,6 +36,7 @@ def main():
 
     e2 = NormativeModelEngineMixed()
     e2.load_hc_data()
+    e2.alpha_fn = load_trend()  # needed for nb_fixed/intercept genes' fixed dispersion fallback
     n_hc = e2.X_hc_scaled.shape[0]
     folds = list(StratifiedKFold(MP["n_splits"], shuffle=True, random_state=42).split(np.zeros(n_hc), e2.batch))
 
@@ -87,7 +89,10 @@ def main():
         v = z[np.isfinite(z)]
         if len(v) < 8:
             continue
-        stats.append(dict(gene=g, route="model", stage=summary.loc[g, "stage"], nz=int(summary.loc[g, "nz"]),
+        # training_summary.csv (from the Task 6a cascade output) never tracked
+        # nz -- compute it directly from the loaded HC counts instead.
+        nz = int((e2.Y_hc[:, e2._gene_col[g]] > 0).sum())
+        stats.append(dict(gene=g, route="model", stage=summary.loc[g, "stage"], nz=nz,
                           w1=_w1_normal(v), mean_z=float(v.mean()), std_z=float(v.std()),
                           skew_z=float(skew(v)), kurt_z=float(kurtosis(v)), n_valid=len(v)))
     df = pd.DataFrame(stats)
