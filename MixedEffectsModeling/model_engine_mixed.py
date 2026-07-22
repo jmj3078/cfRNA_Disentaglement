@@ -1,0 +1,141 @@
+import pickle
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import scanpy as sc
+from scipy.sparse import issparse
+from sklearn.preprocessing import StandardScaler
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import MixedEffectsModeling.config as config
+from MixedEffectsModeling.dispersion_trend import build_trend, load_trend, save_trend
+from MixedEffectsModeling.marginal_rqr import marginal_nb_rqr
+
+MP = config.SPIKE_PARAMS
+
+
+@dataclass
+class GeneRecordMixed:
+    name: str
+    route: str = ""
+    stage: str = ""
+    nz: int = 0
+    ok: bool = False
+    singular: bool = False
+    tau2: float = 0.0
+    mu_coef: np.ndarray = None
+    disp_coef: np.ndarray = None
+    fail_reason: str = ""
+
+
+class NormativeModelEngineMixed:
+    def __init__(self):
+        self.X_hc_scaled = None
+        self.Y_hc = None
+        self.scaler = None
+        self.batch = None
+        self.pc_gene_names = []
+        self._gene_col = {}
+        self.genes = {}
+        self.alpha_fn = None
+        self.nz_a_max = None
+
+    def load_hc_data(self, h5ad_path=config.H5AD_PATH):
+        adata = sc.read_h5ad(h5ad_path)
+        adata = adata[adata.obs["QC_Passed"] == True]
+        adata = adata[adata.obs["Phenotype_Processed"].notna()]
+        adata = adata[adata.obs["Phenotype_Processed"] != "Unknown"]
+        adata = adata[adata.obs["broad_protocol_category"] != "Exome-based (EB)"]
+        is_hc = (adata.obs["Phenotype_Processed"].astype(str) == "Healthy Control").values
+        X_raw = adata.obs[config.BIAS_COLUMNS].values.astype(np.float64)
+        self.scaler = StandardScaler()
+        self.X_hc_scaled = self.scaler.fit_transform(X_raw[is_hc])
+        self.batch = adata.obs["Batch_ID"].astype(str).values[is_hc]
+        Y_raw = adata.X.toarray() if issparse(adata.X) else np.asarray(adata.X)
+        self.Y_hc = np.round(Y_raw[is_hc]).astype(np.float64)
+        is_pc = (adata.var["GeneType"] == "protein_coding").values
+        self.pc_gene_names = adata.var_names[is_pc].tolist()
+        pc_indices = np.where(is_pc)[0]
+        self._gene_col = {g: pc_indices[i] for i, g in enumerate(self.pc_gene_names)}
+
+    def build_dispersion_trend(self):
+        Y_pc = self.Y_hc[:, list(self._gene_col.values())]
+        trend = build_trend(Y_pc, min_nz=MP["trend_min_nz"])
+        save_trend(trend)
+        self.alpha_fn = load_trend()
+
+    def assign_routes(self):
+        # nz_a_max is deferred (Task 6a/6b) -- default to 0 (no gene routed to
+        # "pool", every gene attempts the model cascade) until a real threshold
+        # is chosen and Threshold_Sweep/nz_a_max.txt exists.
+        nz_a_max_path = config.THRESHOLD_SWEEP_DIR / "nz_a_max.txt"
+        self.nz_a_max = int(nz_a_max_path.read_text().strip()) if nz_a_max_path.exists() else 0
+        nz = (self.Y_hc[:, list(self._gene_col.values())] > 0).sum(axis=0)
+        for i, g in enumerate(self.pc_gene_names):
+            n = int(nz[i])
+            route = "pool" if n < self.nz_a_max else "model"
+            self.genes[g] = GeneRecordMixed(name=g, route=route, nz=n)
+
+    def train(self, limit=None, tmp_dir="/tmp/glmm_train"):
+        Path(tmp_dir).mkdir(exist_ok=True)
+        model_genes = [g for g, r in self.genes.items() if r.route == "model"][:limit]
+        pd.DataFrame(self.X_hc_scaled, columns=config.BIAS_COLUMNS).to_csv(f"{tmp_dir}/X.csv.gz")
+        Y_model = self.Y_hc[:, [self._gene_col[g] for g in model_genes]]
+        pd.DataFrame(Y_model, columns=model_genes).to_csv(f"{tmp_dir}/Y.csv.gz")
+        pd.DataFrame({"Batch_ID": self.batch}).to_csv(f"{tmp_dir}/batch.csv.gz")
+        pd.DataFrame({"gene": model_genes}).to_csv(f"{tmp_dir}/genes.csv", index=False)
+
+        subprocess.run([
+            "Rscript", str(config.GLMM_FIT_R), "--x", f"{tmp_dir}/X.csv.gz", "--y", f"{tmp_dir}/Y.csv.gz",
+            "--batch", f"{tmp_dir}/batch.csv.gz", "--genes", f"{tmp_dir}/genes.csv",
+            "--trend", str(config.DISPERSION_TREND_PATH), "--mode", "cascade", "--out", f"{tmp_dir}/results.csv",
+        ], check=True, cwd=str(config.GLMM_FIT_R.parent))
+
+        results = pd.read_csv(f"{tmp_dir}/results.csv").set_index("gene")
+        for g, row in results.iterrows():
+            rec = self.genes[g]
+            rec.stage, rec.ok, rec.singular, rec.tau2 = row["stage"], bool(row["ok"]), bool(row["singular"]), float(row["tau2"])
+            rec.mu_coef = row[[c for c in results.columns if c.startswith("mu_coef_")]].values.astype(float)
+            rec.disp_coef = row[[c for c in results.columns if c.startswith("disp_coef_")]].values.astype(float)
+            rec.fail_reason = row["fail_reason"]
+            if not rec.ok:
+                rec.route = "excluded"
+
+    def training_summary(self):
+        rows = [dict(gene=r.name, route=r.route, stage=r.stage, nz=r.nz, ok=r.ok,
+                    singular=r.singular, tau2=r.tau2, fail_reason=r.fail_reason)
+               for r in self.genes.values()]
+        return pd.DataFrame(rows).set_index("gene")
+
+    def score(self, X_test_raw, Y_test, gene_names=None, seed=42, as_dict=False):
+        gene_names = gene_names or [g for g in self.genes if self.genes[g].ok]
+        X_test = self.scaler.transform(X_test_raw.astype(np.float64))
+        Xa = np.column_stack([np.ones(len(X_test)), X_test])
+        Z = np.full((len(X_test), len(gene_names)), np.nan, dtype=np.float32)
+        for j, g in enumerate(gene_names):
+            rec = self.genes.get(g)
+            if rec is None or not rec.ok:
+                continue
+            mu = np.clip(np.exp(Xa @ np.nan_to_num(rec.mu_coef, nan=0.0)), 1e-6, 1e8)
+            alpha = np.exp(-rec.disp_coef[0]) if not np.isnan(rec.disp_coef[0]) else self.alpha_fn(float(mu.mean()))
+            Z[:, j] = marginal_nb_rqr(Y_test[:, j].astype(np.float64), mu, alpha, rec.tau2, seed + j)
+        return Z if not as_dict else {"combined": Z, "gene_names": list(gene_names)}
+
+    def save(self, directory):
+        directory = Path(directory); directory.mkdir(parents=True, exist_ok=True)
+        with open(directory / "genes.pkl", "wb") as f: pickle.dump(self.genes, f)
+        with open(directory / "scaler.pkl", "wb") as f: pickle.dump(self.scaler, f)
+        self.training_summary().to_csv(directory / "training_summary.csv")
+
+    @classmethod
+    def load(cls, directory):
+        directory = Path(directory)
+        engine = cls()
+        with open(directory / "genes.pkl", "rb") as f: engine.genes = pickle.load(f)
+        with open(directory / "scaler.pkl", "rb") as f: engine.scaler = pickle.load(f)
+        engine.alpha_fn = load_trend()
+        return engine
