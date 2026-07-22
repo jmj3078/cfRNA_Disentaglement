@@ -1,5 +1,11 @@
 # Mixed-Effects Production Engine — Design
 
+**Update 2026-07-23:** superseded below — the engine is built entirely inside
+`MixedEffectsModeling/`, not `Modeling/` (zero cross-imports; reuse by
+copy-paste only). See the implementation plan's header for the current file
+list. Design rationale below (per-stage table, marginal scoring, etc.) is
+unaffected, only the file location changed.
+
 Branch: `mixed-effects-batch-refactor`. Builds on
 `2026-07-22-mixed-effects-batch-refactor-design.md` (architecture decisions,
 per-stage table, marginal-scoring rationale — not repeated here) and the now-closed
