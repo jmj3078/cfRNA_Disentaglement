@@ -20,6 +20,35 @@ fml_mu <- as.formula(paste("y__ ~", paste(safe_names, collapse = " + "), "+ (1 |
 fml_disp <- as.formula(paste("~", paste(safe_names, collapse = " + ")))
 priors_df <- if (use_priors) data.frame(prior = "normal(0, 0.05)", class = "betad", coef = "") else NULL
 
+# Mirrors MixedEffectsModeling/config.py's SPIKE_PARAMS["beta_explode_thr"] (which in turn
+# mirrors the root project's config.MODELING_PARAMS["beta_explode_thr"] convention). R and
+# Python config are kept fully separate by design in this spike, so this is duplicated here.
+BETA_EXPLODE_THR <- 3.0
+
+# Principled convergence/singularity check based on TMB's own positive-definite-Hessian
+# diagnostic (fit$sdr$pdHess), rather than fragile string-matching on R warning text.
+# pdHess FALSE does not always mean a genuine optimizer failure: a batch variance
+# component (tau2) estimated at/near the zero boundary makes the Hessian look
+# non-positive-definite purely because the parameter sits at the edge of its domain --
+# a normal, expected "boundary singular fit" outcome for genes with no real batch effect.
+# We rescue that case as converged (singular = TRUE, tau2 forced to exactly 0) provided the
+# fixed-effect coefficients are not exploding -- checked in BOTH the mean (cond) and
+# dispersion (disp) submodels, since Task 4 found dispersion coefficients, not mean, were
+# the ones that actually explode on genuinely unstable fits.
+is_converged <- function(fit, beta_explode_thr) {
+  if (inherits(fit, "try-error")) return(list(ok = FALSE, singular = NA, tau2 = NA))
+  tau2 <- as.numeric(VarCorr(fit)$cond$batch__[1, 1])
+  if (isTRUE(fit$sdr$pdHess)) {
+    return(list(ok = TRUE, singular = FALSE, tau2 = tau2))
+  }
+  beta_max <- max(abs(c(fixef(fit)$cond, fixef(fit)$disp)))
+  if (isTRUE(tau2 < 1e-5) && isTRUE(beta_max < beta_explode_thr)) {
+    return(list(ok = TRUE, singular = TRUE, tau2 = 0.0))
+  }
+  # pdHess FALSE and NOT explained by a boundary tau2 -- a real convergence failure.
+  return(list(ok = FALSE, singular = NA, tau2 = tau2))
+}
+
 rows <- list()
 for (g in genes) {
   df <- as.data.frame(X)
@@ -28,19 +57,13 @@ for (g in genes) {
 
   t0 <- Sys.time()
   fit_res <- tryCatch({
-    warn_msgs <- character(0)
-    fit <- withCallingHandlers(
-      if (use_priors) {
-        glmmTMB(fml_mu, dispformula = fml_disp, family = nbinom2(), data = df, priors = priors_df)
-      } else {
-        glmmTMB(fml_mu, dispformula = fml_disp, family = nbinom2(), data = df)
-      },
-      warning = function(w) { warn_msgs <<- c(warn_msgs, conditionMessage(w)); invokeRestart("muffleWarning") }
-    )
-    vc <- VarCorr(fit)$cond$batch__
-    tau2 <- as.numeric(vc[1, 1])
-    singular <- any(grepl("singular|convergence", warn_msgs, ignore.case = TRUE)) || isTRUE(tau2 < 1e-6)
-    list(converged = TRUE, singular = singular, tau2 = tau2,
+    fit <- if (use_priors) {
+      glmmTMB(fml_mu, dispformula = fml_disp, family = nbinom2(), data = df, priors = priors_df)
+    } else {
+      glmmTMB(fml_mu, dispformula = fml_disp, family = nbinom2(), data = df)
+    }
+    conv <- is_converged(fit, BETA_EXPLODE_THR)
+    list(converged = conv$ok, singular = conv$singular, tau2 = conv$tau2,
          mu_coef = as.numeric(fixef(fit)$cond), disp_coef = as.numeric(fixef(fit)$disp))
   }, error = function(e) list(converged = FALSE, singular = NA, tau2 = NA,
                               mu_coef = rep(NA, length(safe_names) + 1),
