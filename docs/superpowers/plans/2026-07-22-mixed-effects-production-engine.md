@@ -2,9 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the production mixed-effects (batch random-intercept) normative engine in `Modeling/`, replacing per-gene rpy2 calls with a one-pass R-native cascade, and pick the pooling threshold empirically before training.
+**Goal:** Build the production mixed-effects (batch random-intercept) normative engine in `Modeling/`, replacing per-gene rpy2 calls with a one-pass R-native cascade.
 
-**Architecture:** Python writes HC data to disk; R (`glmm_helpers.R` + `glmm_fit.R`) fits everything via `mclapply`, one subprocess call per run; Python reads results back and does all scoring (marginal Gauss-Hermite RQR) in pure Python. `pool_threshold_sweep` runs first and is unconstrained by any cutoff; its output fixes `nz_a_max` before training starts.
+**Architecture:** Python writes HC data to disk; R (`glmm_helpers.R` + `glmm_fit.R`) fits everything via `mclapply`, one subprocess call per run; Python reads results back and does all scoring (marginal Gauss-Hermite RQR) in pure Python.
+
+**Ordering revised 2026-07-23 (user directive, mid-execution):** the pooling threshold is NOT auto-picked before training. Instead: build the full cascade correctly (Tasks 1-5) -> run it unconstrained across ALL genes, no pool-route gating at all (new Task 6) -> EDA the per-gene nz/stage/tau2 trends (referencing `EDA_Modeling/pooling_nz_sweep.py`'s plot style) before deciding anything about pooling -> build the CV framework fully (Task 8) so it's ready to run the moment a threshold is chosen, without blocking on that decision now. `pool_threshold_sweep.R`/`.py` (old Task 6) are still built as code, but their nz_a_max auto-pick is NOT executed as part of this pass -- deferred until the Task 6 EDA has been reviewed.
 
 **Tech Stack:** R 4.3.1 + glmmTMB 1.1.9 (subprocess only, no rpy2), Python (scanpy, pandas, numpy, sklearn), conda env `scRNA`.
 
@@ -15,7 +17,8 @@
 - New output dirs, never overwrite existing production artifacts: `Modeling/engine_state_mixed/`, `Modeling/CV_Results_mixed/`, `Modeling/Threshold_Sweep/`.
 - `mclapply` cores: `min(parallel::detectCores() - 1, 8)`.
 - Reuse `MixedEffectsModeling/Spike_Results/` (40-gene pilot, already-validated `is_converged()` semantics) as the regression fixture — do not modify anything under `MixedEffectsModeling/`.
-- `nz_a_max` auto-picked: smallest NZ cutoff where median W1 (held-out) first exceeds 0.25.
+- `nz_a_max` decision is DEFERRED (see ordering note above) -- do not auto-run `pool_threshold_sweep.py`'s pick as part of this pass. Build it, don't execute the decision.
+- `model_engine_mixed.py`'s `assign_routes()` must work with NO `nz_a_max` fixed yet: default to gating nothing (every gene attempts the model cascade) rather than requiring `Threshold_Sweep/nz_a_max.txt` to exist.
 - Conda env `scRNA`: `source ~/miniconda3/etc/profile.d/conda.sh && conda activate scRNA` before any command.
 - No pytest — verification is scripts with embedded asserts printing PASS/FAIL, per project convention.
 
@@ -452,7 +455,139 @@ git commit -m "Add pure-Python marginal RQR (Gauss-Hermite quadrature over batch
 
 ---
 
-### Task 6: `Modeling/pool_threshold_sweep.R` + `.py`
+### Task 6a: Full unconstrained cascade run + EDA (no pool-route gating)
+
+**Files:**
+- Create: `Modeling/run_glmm_full_unconstrained.py`, `Modeling/eda_glmm_full_unconstrained.py`
+
+**Interfaces:**
+- Consumes: `Modeling/glmm_fit.R` (Task 3).
+- Produces: `Modeling/Threshold_Sweep/full_cascade_unconstrained.csv` (every protein-coding HC gene, `--mode cascade`, no NZ filtering at all -- every gene attempts nbi->...->intercept regardless of NZ), and `Threshold_Sweep/Figures/nz_vs_stage_tau2.png` (per-NZ-bin: stage composition, `ok` rate, median `tau2` -- mirrors `EDA_Modeling/pooling_nz_sweep.py`'s plot style, but no threshold line drawn yet since none is chosen).
+
+- [ ] **Step 1: Write `run_glmm_full_unconstrained.py`** (loads full HC data exactly like `Modeling/model_engine.py:load_hc_data`, writes it once, calls `glmm_fit.R --mode cascade` over every protein-coding gene with no NZ pre-filter)
+
+```python
+import subprocess
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import scanpy as sc
+from scipy.sparse import issparse
+from sklearn.preprocessing import StandardScaler
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import config
+
+TMP = Path("/tmp/glmm_full_unconstrained")
+TMP.mkdir(exist_ok=True)
+OUT = config.THRESHOLD_SWEEP_DIR / "full_cascade_unconstrained.csv"
+config.THRESHOLD_SWEEP_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def main():
+    adata = sc.read_h5ad(config.H5AD_PATH)
+    m = ((adata.obs["QC_Passed"] == True) & (adata.obs["Phenotype_Processed"].notna()) &
+         (adata.obs["Phenotype_Processed"] != "Unknown") &
+         (adata.obs["broad_protocol_category"] != "Exome-based (EB)"))
+    a = adata[m]
+    is_hc = (a.obs["Phenotype_Processed"].astype(str) == "Healthy Control").values
+    is_pc = (a.var["GeneType"] == "protein_coding").values
+    X = a.obs[config.BIAS_COLUMNS].values.astype(np.float64)[is_hc]
+    Xs = StandardScaler().fit_transform(X)
+    Y = a.X.toarray() if issparse(a.X) else np.asarray(a.X)
+    Y = np.round(Y[is_hc][:, is_pc]).astype(np.float64)
+    names = a.var_names[is_pc].tolist()
+    batch = a.obs["Batch_ID"].astype(str).values[is_hc]
+
+    pd.DataFrame(Xs, columns=config.BIAS_COLUMNS).to_csv(TMP / "X.csv.gz")
+    pd.DataFrame(Y, columns=names).to_csv(TMP / "Y.csv.gz")
+    pd.DataFrame({"Batch_ID": batch}).to_csv(TMP / "batch.csv.gz")
+    pd.DataFrame({"gene": names}).to_csv(TMP / "genes.csv", index=False)
+    print(f"HC={Xs.shape[0]}  genes={len(names)}  batches={len(set(batch))}")
+
+    if not config.DISPERSION_TREND_PATH.exists():
+        raise SystemExit("Build the Phase-0 trend first (see existing Modeling/model_engine.py:build_dispersion_trend)")
+
+    subprocess.run([
+        "Rscript", str(config.GLMM_FIT_R), "--x", str(TMP / "X.csv.gz"), "--y", str(TMP / "Y.csv.gz"),
+        "--batch", str(TMP / "batch.csv.gz"), "--genes", str(TMP / "genes.csv"),
+        "--trend", str(config.DISPERSION_TREND_PATH), "--mode", "cascade", "--out", str(OUT),
+        "--chunk-size", "200", "--cores", str(min(8, 8)),
+    ], check=True, cwd=str(config.MODELING_DIR))
+    print(f"Saved -> {OUT}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+- [ ] **Step 2: Write `eda_glmm_full_unconstrained.py`** (NZ-bin trend plot, no threshold decision)
+
+```python
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import config
+from viz_style import apply_style
+
+OUT = config.THRESHOLD_SWEEP_DIR
+df = pd.read_csv(OUT / "full_cascade_unconstrained.csv")
+nz = pd.read_csv("/tmp/glmm_full_unconstrained/Y.csv.gz", index_col=0)
+df["nz"] = df["gene"].map((nz > 0).sum(axis=0).to_dict())
+df["nz_bin"] = pd.cut(df["nz"], bins=[0, 3, 7, 15, 30, 50, 100, np.inf])
+
+summary = df.groupby("nz_bin", observed=True).agg(
+    n_genes=("gene", "size"), ok_rate=("ok", "mean"),
+    tau2_median=("tau2", "median"),
+    pct_nbi=("stage", lambda s: (s == "nbi").mean()),
+    pct_intercept=("stage", lambda s: (s == "intercept").mean()),
+)
+summary.to_csv(OUT / "nz_vs_stage_tau2_summary.csv")
+print(summary.round(3).to_string())
+
+apply_style()
+import matplotlib.pyplot as plt
+fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
+x = range(len(summary))
+axes[0].bar(x, summary["ok_rate"]); axes[0].set(title="ok rate", xlabel="nz bin")
+axes[1].bar(x, summary["tau2_median"]); axes[1].set(title="median tau2", xlabel="nz bin")
+axes[2].bar(x, summary["pct_nbi"], label="nbi"); axes[2].bar(x, summary["pct_intercept"], bottom=summary["pct_nbi"], label="intercept")
+axes[2].legend(); axes[2].set(title="stage composition", xlabel="nz bin")
+for ax in axes:
+    ax.set_xticks(list(x)); ax.set_xticklabels([str(b) for b in summary.index], rotation=45, ha="right")
+fig.tight_layout()
+(OUT / "Figures").mkdir(exist_ok=True)
+fig.savefig(OUT / "Figures" / "nz_vs_stage_tau2.png", dpi=150)
+print(f"Saved -> {OUT}/nz_vs_stage_tau2_summary.csv, {OUT}/Figures/nz_vs_stage_tau2.png")
+```
+
+- [ ] **Step 3: Run both, smoke-test with a gene subset first**
+
+The full run is on ~19,538 genes (design spec's core-hour estimate applies) -- smoke-test on a `--limit`-style subset first by temporarily slicing `names`/`Y` in `run_glmm_full_unconstrained.py` to e.g. 200 genes, confirm the CSV/plot pipeline works, then run unconstrained on all genes per the user's directive (proceed automatically, no pause).
+
+```bash
+cd /project/cfRNA_NormativeModeling
+python Modeling/run_glmm_full_unconstrained.py
+python Modeling/eda_glmm_full_unconstrained.py
+```
+Expected: prints the per-NZ-bin summary table, saves the CSV and figure. This is descriptive output for the user to review later -- do not pick or hardcode an `nz_a_max` from it as part of this task.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add Modeling/run_glmm_full_unconstrained.py Modeling/eda_glmm_full_unconstrained.py
+git commit -m "Add full unconstrained cascade run + NZ-trend EDA (no pooling threshold decided)"
+```
+
+---
+
+### Task 6b: `Modeling/pool_threshold_sweep.R` + `.py`
 
 **Files:**
 - Create: `Modeling/pool_threshold_sweep.R`, `Modeling/pool_threshold_sweep.py`
@@ -710,8 +845,11 @@ class NormativeModelEngineMixed:
         self.alpha_fn = load_trend()
 
     def assign_routes(self):
+        # nz_a_max is deferred (Task 6a/6b) -- default to 0 (no gene routed to
+        # "pool", every gene attempts the model cascade) until a real threshold
+        # is chosen and Threshold_Sweep/nz_a_max.txt exists.
         nz_a_max_path = config.THRESHOLD_SWEEP_DIR / "nz_a_max.txt"
-        self.nz_a_max = int(nz_a_max_path.read_text().strip())
+        self.nz_a_max = int(nz_a_max_path.read_text().strip()) if nz_a_max_path.exists() else 0
         nz = (self.Y_hc[:, list(self._gene_col.values())] > 0).sum(axis=0)
         for i, g in enumerate(self.pc_gene_names):
             n = int(nz[i])
@@ -928,40 +1066,46 @@ git commit -m "Add cv_glmm_engine.py (5-fold CV, per-fold R refit, marginal scor
 
 ### Task 9: Full unattended run
 
-**Files:** none new — orchestrates Tasks 6-8's scripts on real data.
+**Files:** none new — orchestrates prior tasks on real data. `nz_a_max` is still undecided (deferred per the reorder), so this reuses Task 6a's already-computed `full_cascade_unconstrained.csv` (every gene, no pool gating) as the engine's training result rather than re-running the ~19,538-gene cascade a second time.
 
-- [ ] **Step 1: Threshold sweep (already run in Task 6) — confirm `nz_a_max.txt` exists**
-
-```bash
-cat /project/cfRNA_NormativeModeling/Modeling/Threshold_Sweep/nz_a_max.txt
-```
-
-- [ ] **Step 2: Full training run** (background; per user confirmation, proceed automatically once Task 4's regression check passes)
+- [ ] **Step 1: Load Task 6a's output into `engine_state_mixed/` directly** (skip re-training)
 
 ```bash
 cd /project/cfRNA_NormativeModeling
 python -c "
-from Modeling.model_engine_mixed import NormativeModelEngineMixed
-e = NormativeModelEngineMixed()
-e.load_hc_data()
-e.build_dispersion_trend()
-e.assign_routes()
-e.train()
-e.save('Modeling/engine_state_mixed')
-print(e.training_summary()['stage'].value_counts())
+import pickle
+import pandas as pd
+from Modeling.model_engine_mixed import GeneRecordMixed
+import config
+
+df = pd.read_csv(config.THRESHOLD_SWEEP_DIR / 'full_cascade_unconstrained.csv').set_index('gene')
+genes = {}
+for g, row in df.iterrows():
+    rec = GeneRecordMixed(name=g, route='model' if row['ok'] else 'excluded', stage=row['stage'],
+                          ok=bool(row['ok']), singular=bool(row['singular']), tau2=float(row['tau2']),
+                          fail_reason=row['fail_reason'])
+    rec.mu_coef = df.loc[g, [c for c in df.columns if c.startswith('mu_coef_')]].values.astype(float)
+    rec.disp_coef = df.loc[g, [c for c in df.columns if c.startswith('disp_coef_')]].values.astype(float)
+    genes[g] = rec
+
+config.ENGINE_MIXED_DIR.mkdir(parents=True, exist_ok=True)
+with open(config.ENGINE_MIXED_DIR / 'genes.pkl', 'wb') as f:
+    pickle.dump(genes, f)
+df.to_csv(config.ENGINE_MIXED_DIR / 'training_summary.csv')
+print('ok rate:', df['ok'].mean(), 'stage counts:', df['stage'].value_counts().to_dict())
 "
 ```
-Expected: completes (may take hours per the design spec's core-hour estimate), prints a stage-count breakdown, `Modeling/engine_state_mixed/training_summary.csv` exists.
+Expected: prints an `ok` rate and stage-count breakdown for all HC protein-coding genes.
 
-- [ ] **Step 3: Full CV**
+- [ ] **Step 2: Full CV run** (background; per user confirmation, proceed automatically once Task 4's regression check passes; this re-fits per fold via `glmm_fit.R --mode fixed_stage`, it does not reuse Step 1's full-data fit)
 
 ```bash
 cd /project/cfRNA_NormativeModeling
 python Modeling/cv_glmm_engine.py
 ```
-Expected: `Saved -> Modeling/CV_Results_mixed/cv_stats.csv`, per-stage median `w1` printed (values near the existing engine's calibration are the target, not a hard gate — report whatever is observed).
+Expected: completes (may take hours per the design spec's core-hour estimate x5 folds), `Saved -> Modeling/CV_Results_mixed/cv_stats.csv`, per-stage median `w1` printed (values near the existing engine's calibration are the target, not a hard gate — report whatever is observed).
 
-- [ ] **Step 4: Commit outputs' provenance** (data itself is gitignored per `*.csv`/`*.pkl` convention; commit only code changes if any were needed to get the run through)
+- [ ] **Step 3: Commit outputs' provenance** (data itself is gitignored per `*.csv`/`*.pkl` convention; commit only code changes if any were needed to get the run through)
 
 ```bash
 cd /project/cfRNA_NormativeModeling
