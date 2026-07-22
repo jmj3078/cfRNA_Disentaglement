@@ -1,0 +1,35 @@
+# Step 0 Spike Report
+
+## 1. glmmTMB install + priors() capability
+
+- Installed: True (version 1.1.9)
+- `priors` formal argument present: True
+- Working priors() probe: True (ok)
+
+## 2. Sigma parameterization equivalence (gamlss vs glmmTMB)
+
+- Verdict as literally computed: **FAIL** (max relative sigma(x) diff = 2.948e+55, tolerance 0.10; worst gene ENSG00000206013.2)
+- This FAIL is real (not suppressed) but is driven entirely by 2-3 outlier genes with poorly-identified, fully unpenalized dispersion regressions (10 covariates on ~693 samples), evaluated at extreme multi-SD covariate grid points where exponential amplification of already-unstable coefficients produces astronomic ratios. Investigation (see `.superpowers/sdd/task-4-report.md`) established, independently of this tolerance check: (a) the `sigma_glmmtmb(x) = exp(-X @ disp_coef)` reciprocal-log mapping is **correct** -- verified directly against glmmTMB's own `1/theta` computation from `fixef(fit)$disp` at individual data rows, matching row-by-row; (b) 39/40 genes converged in both gamlss and glmmTMB; (c) restricted to the representative mean-covariate point, 33/39 (85%) of genes agree to within <1.3% relative difference (median 0.026%); (d) the remaining outliers are exactly the genes glmmTMB itself flags with a non-positive-definite Hessian warning, i.e. both packages independently struggle to identify the same unstable dispersion-on-covariates fits, not a disagreement caused by a sign or parameterization bug.
+- Bottom line: **the parameterization mapping itself is correct; the instability is a fixable dispersion-regularization problem, not a sign/parameterization bug.** Production dispersion fits must use a ridge/prior penalty on `dispformula` (glmmTMB `priors()`, confirmed working in section 1) rather than the unpenalized fit used here for a clean comparison -- exactly what the existing gamlss engine already does (`ridge_lambda_sigma` > 0).
+
+## 3. tau2 / convergence / singular-fit distribution
+
+- Converged: 38/40
+- Singular-but-converged: 0/38
+- Convergence/singularity determination was reworked after the brief was written (see `.superpowers/sdd/task-5-report.md`): based on glmmTMB's own `fit$sdr$pdHess` diagnostic rather than fragile warning-text matching, checking beta-explosion in both mean AND dispersion coefficients, plus a `tau2 >= 9.0` upper bound (`beta_explode_thr^2`) rejecting implausibly large batch variance as non-identifiable even when `pdHess=TRUE`. Final: **38/40 genes converged, 0 singular**. One gene failed on dispersion-coefficient explosion (19.6, far past `beta_explode_thr=3.0`); one failed on the new tau2 upper bound (30.4, `sd(b)~5.5` -- implausible batch-to-batch swings on the log(mu) scale, likely driven by a low-n HC batch: this pilot's 31 HC batches range from n=1 to n=116 samples).
+- tau2 distribution (converged, non-singular genes): {'count': 38.0, 'mean': 0.22686055961408697, 'std': 0.6497977052612063, 'min': 8.287207390723701e-10, '25%': 5.816735290646273e-09, '50%': 0.0239471620694914, '75%': 0.220146029456689, 'max': 3.93366191734845}
+- Among the 38 converged genes, most tau2 values are near-zero (little to no detectable batch heterogeneity on the log(mu) scale) and none approach the 9.0 rejection boundary except the one gene rejected for exceeding it -- i.e. the boundary is not marginally tight against the rest of the pilot, it cleanly separates one outlier from the rest.
+- Mean wall time per gene fit: 0.99s (estimate for 17,572 genes at stage nbi: 4.8 core-hours)
+
+## 4. mclapply memory behavior
+
+- Schema differs from the brief's illustrative script: measurement moved from parent-process RSS sampled once per chunk (`rss_mb_before`/`rss_mb_after`, found to be structurally blind to fork-local memory) to **per-call, per-PID granularity** (`config, chunk, call_order, pid, rss_mb, gene`) sampled from inside each forked worker -- see `.superpowers/sdd/task-6-report.md`. The per-PID growth below is computed here in Python by grouping `(config, chunk, pid)` and taking the RSS delta from first to last `call_order` within each group (restricted to groups with >1 row), mirroring `MixedEffectsModeling/mclapply_memory_test.R`'s own `per_pid_growth()` logic.
+- `chunk20_preschedule_false`: 200 distinct PIDs across 200 fits, busiest PID handled 1 gene(s) sequentially; max per-PID RSS growth (first to last call in a persistent fork) = 0 MB
+- `chunk20_preschedule_true`: 40 distinct PIDs across 200 fits, busiest PID handled 5 gene(s) sequentially; max per-PID RSS growth (first to last call in a persistent fork) = 9 MB
+- Two limitations, stated plainly (not buried): (1) cores had to be capped at 4 (not the ~23 available on this machine) because `cores >= chunk_size` defeats `mc.preschedule` regardless of RSS-measurement method -- with enough cores every item gets its own fork even under preschedule=TRUE, so no worker ever handles more than one gene and the accumulation scenario this test exists to check becomes structurally unreachable. This result therefore characterizes whether a persistent worker leaks *at all*, but does NOT represent behavior at full production parallelism width. (2) 5 genes/worker (the busiest PID under preschedule=TRUE) is a short sequence -- not long enough to distinguish a one-time warm-up cost from a sustained per-fit leak. The observed 9 MB growth over 5 fits is modest but inconclusive on that question; a longer per-worker sequence (more genes per chunk relative to cores) would be needed for a firmer verdict before full-engine parallelism parameters are finalized.
+
+## Decisions this report should feed back into the design spec
+
+- Small-batch (HC n<3) handling and the tau2 upper bound: **already resolved and folded into the design spec**, not an open decision left for this report. Commit `0feca49` added the `nbi_disp_intercept` demotion stage (same mean submodel as nbi, dispersion simplified to a scalar MLE'd from the gene's own data via `dispformula=~1`, between nbi and nb_fixed in the chain) and corrected the spec's original claim that tau2 is unconditionally exempt from the demotion checks -- tau2 >= 9.0 is now explicitly rejected as non-identifiable even with `pdHess=TRUE`, per section 3's finding above.
+- Sigma regularization approach: use `priors()` (confirmed working, section 1) with a ridge-equivalent penalty on the dispersion formula for the nbi stage, per section 2's finding that unpenalized dispersion-on-covariates regression is what destabilizes the worst-behaved genes -- not a fallback to unpenalized + `beta_explode_thr` alone.
+- mclapply chunking parameters for the full engine: neither config in section 4 showed problematic drift at the tested (capped, short-sequence) scale, so this does not yet settle production chunking parameters -- a longer per-worker sequence at realistic core counts should be re-tested before finalizing engine-wide parallelism settings, per the two limitations stated above.
