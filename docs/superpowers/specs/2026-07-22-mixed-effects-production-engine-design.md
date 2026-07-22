@@ -44,6 +44,18 @@ regression fixture: `glmm_fit.R`'s cascade output on those same genes must match
 the spike's per-gene stage/tau2/singular outcomes (smoke check before any full
 run). `cv_glmm_engine.py` supports `--limit N` per existing convention.
 
+## Unattended-execution parameters (user confirmed, stepping away)
+
+- `nz_a_max`: auto-picked as smallest NZ cutoff where median W1 first exceeds
+  0.25 (existing codebase calibration heuristic). Sweep summary/figure saved
+  regardless for later manual review.
+- Full training run proceeds automatically once the 40-gene pilot regression
+  check passes — no pause for approval.
+- `mclapply` cores: `min(detectCores()-1, 8)` (shared-machine conservative
+  default; chunk size/checkpointing per architecture spec).
+- Final whole-branch review Critical/Important findings: dispatch fix
+  subagent(s) autonomously per the established loop, same as the spike.
+
 ## Out of scope
 
 Full LOBO re-validation, downstream `pipeline/` consumers (`scoring.py`,
