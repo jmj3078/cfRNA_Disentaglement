@@ -20,9 +20,13 @@ X <- as.matrix(read.csv(opt$x, row.names = 1))
 Y <- read.csv(opt$y, row.names = 1)
 batch <- read.csv(opt$batch, row.names = 1)[[1]]
 gene_meta <- read.csv(opt$genes)  # columns: gene, [stage] (stage only needed for fixed_stage mode)
-trend <- fromJSON(opt$trend)      # named list: mean grid + alpha grid, see dispersion_trend.py
+# Matches Modeling/dispersion_trend.py's actual saved schema: log-scale lowess
+# grid + floor/cap, not a plain mean/alpha grid.
+trend <- fromJSON(opt$trend)
 alpha_of <- function(mean_y) {
-  approx(trend$mean_grid, trend$alpha_grid, xout = mean_y, rule = 2)$y
+  lm <- log(max(mean_y, 1e-8))
+  s <- exp(approx(trend$lowess_logmu, trend$lowess_logsigma, xout = lm, rule = 2)$y)
+  min(max(s, trend$alpha_floor), trend$alpha_cap)
 }
 safe_names <- sanitize_names(colnames(X))
 colnames(X) <- safe_names

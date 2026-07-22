@@ -6,6 +6,19 @@ GAMLSS_R_HELPER = ROOT / "Modeling" / "gamlss.r"
 
 SPIKE_DIR = Path(__file__).resolve().parent / "Spike_Results"
 
+# Production engine paths -- fully independent of root config.py/Modeling/ by
+# design (see docs/superpowers/specs/2026-07-22-mixed-effects-production-engine-design.md).
+_HERE = Path(__file__).resolve().parent
+ENGINE_MIXED_DIR        = _HERE / "engine_state_mixed"
+CV_MIXED_DIR            = _HERE / "CV_Results_mixed"
+CV_MIXED_FIG_DIR        = CV_MIXED_DIR / "Figures"
+THRESHOLD_SWEEP_DIR     = _HERE / "Threshold_Sweep"
+THRESHOLD_SWEEP_FIG_DIR = THRESHOLD_SWEEP_DIR / "Figures"
+GLMM_HELPERS_R = _HERE / "glmm_helpers.R"
+GLMM_FIT_R     = _HERE / "glmm_fit.R"
+POOL_SWEEP_R   = _HERE / "pool_threshold_sweep.R"
+DISPERSION_TREND_PATH = ENGINE_MIXED_DIR / "dispersion_trend.json"
+
 BIAS_COLUMNS = [
     "log(Total Reads)",
     "Spliced Reads (%)",

@@ -34,16 +34,6 @@ RARE_REF       = Z_SCORES_DIR / "rare_event_ref.pkl"
 R_HELPER       = MODELING_DIR / "gamlss.r"
 DISPERSION_TREND_PATH = ENGINE_DIR / "dispersion_trend.json"
 
-# Mixed-effects production engine paths
-ENGINE_MIXED_DIR        = MODELING_DIR / "engine_state_mixed"
-CV_MIXED_DIR            = MODELING_DIR / "CV_Results_mixed"
-CV_MIXED_FIG_DIR        = CV_MIXED_DIR / "Figures"
-THRESHOLD_SWEEP_DIR     = MODELING_DIR / "Threshold_Sweep"
-THRESHOLD_SWEEP_FIG_DIR = THRESHOLD_SWEEP_DIR / "Figures"
-GLMM_HELPERS_R          = MODELING_DIR / "glmm_helpers.R"
-GLMM_FIT_R              = MODELING_DIR / "glmm_fit.R"
-POOL_SWEEP_R            = MODELING_DIR / "pool_threshold_sweep.R"
-
 H5AD_PATH = PATHS["merged_qc"]   # normative modeling
 
 # scoring 산출 Z-score 행렬 (disease_scoring/scoring.py) → Z_scores/ 디렉토리
