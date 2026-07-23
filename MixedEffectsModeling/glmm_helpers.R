@@ -75,13 +75,19 @@ fit_pooled_glmm <- function(Y_block, X, batch, mean_hc, eps, rare_overdisp_thr) 
     mult_lo = as.numeric(quantile(exp(X %*% beta[-1]), 0.001)),
     mult_hi = as.numeric(quantile(exp(X %*% beta[-1]), 0.999)))
 
+  # (1|batch__) tau2, extracted positionally like is_converged() -- pool route
+  # has no demotion chain so it doesn't gate on tau2, but scoring/CV still needs
+  # this to marginalize correctly instead of silently assuming tau2==0.
+  pool_tau2 <- function(fit) as.numeric(VarCorr(fit)$cond[[1]][1, 1])
+
   fit_pois <- tryCatch(glmmTMB(mu_fml, family = poisson(), data = df), error = function(e) NULL)
   if (is.null(fit_pois)) return(list(ok = FALSE))
   ratio <- sum(residuals(fit_pois, type = "pearson")^2) / df.residual(fit_pois)
   if (ratio <= rare_overdisp_thr) {
     beta <- as.numeric(fixef(fit_pois)$cond)
     mc <- mult_clip(beta)
-    return(list(ok = TRUE, family = "poisson", beta = beta, alpha = NA, mult_lo = mc$mult_lo, mult_hi = mc$mult_hi))
+    return(list(ok = TRUE, family = "poisson", beta = beta, alpha = NA, tau2 = pool_tau2(fit_pois),
+               overdisp_ratio = ratio, mult_lo = mc$mult_lo, mult_hi = mc$mult_hi))
   }
   fit_nb <- tryCatch(glmmTMB(mu_fml, family = nbinom2(), data = df), error = function(e) NULL)
   if (is.null(fit_nb)) return(list(ok = FALSE))
@@ -89,5 +95,5 @@ fit_pooled_glmm <- function(Y_block, X, batch, mean_hc, eps, rare_overdisp_thr) 
   mc <- mult_clip(beta)
   list(ok = TRUE, family = "negbin", beta = beta,
       alpha = exp(-fixef(fit_nb)$disp[["(Intercept)"]]),  # theta->sigma reciprocal, same convention
-      mult_lo = mc$mult_lo, mult_hi = mc$mult_hi)
+      tau2 = pool_tau2(fit_nb), overdisp_ratio = ratio, mult_lo = mc$mult_lo, mult_hi = mc$mult_hi)
 }

@@ -145,6 +145,7 @@ class NormativeModelEngineMixed:
         n_hc = self.X_hc_scaled.shape[0]
         self.rare_glm = {"family": fit["family"], "beta": np.asarray(fit["beta"]),
                          "alpha": fit["alpha"], "eps": 1.0 / (2 * n_hc),
+                         "tau2": float(fit["tau2"]) if fit.get("tau2") is not None else 0.0,
                          "mult_lo": fit["mult_lo"], "mult_hi": fit["mult_hi"]}
         for g, m in zip(fit["gene"], fit["mean_hc"]):
             rec = self.genes[g]
@@ -167,9 +168,9 @@ class NormativeModelEngineMixed:
                 continue
             if rec.route == "pool":
                 # Shared-beta pooled GLM: log(mu) = log(mean_hc+eps) + Xa @ beta
-                # (fit_pooled_glmm's offset + fixed-effect formula). No random-batch
-                # marginalization here -- fit_pooled_glmm doesn't return tau2 (out of
-                # this fix's scope; see judgment-call note in the fix report).
+                # (fit_pooled_glmm's offset + fixed-effect formula). tau2 from the
+                # model's own (1|batch__) term -- marginalized via marginal_nb_rqr,
+                # not assumed 0.
                 # Covariate multiplier (slopes only, intercept excluded) clipped to the
                 # HC-observed [0.1, 99.9] pct range -- mirrors Modeling/model_engine.py's
                 # _rare_z() clip so an OOD-adjacent sample can't extrapolate mu wildly.
@@ -180,7 +181,8 @@ class NormativeModelEngineMixed:
                 if self.rare_glm["family"] == "poisson":
                     Z[:, j] = _poisson_rqr(Y_test[:, j].astype(np.float64), mu, seed + j)
                 else:
-                    Z[:, j] = marginal_nb_rqr(Y_test[:, j].astype(np.float64), mu, self.rare_glm["alpha"], 0.0, seed + j)
+                    Z[:, j] = marginal_nb_rqr(Y_test[:, j].astype(np.float64), mu, self.rare_glm["alpha"],
+                                              self.rare_glm.get("tau2", 0.0), seed + j)
                 continue
             mu = np.clip(np.exp(Xa @ np.nan_to_num(rec.mu_coef, nan=0.0)), 1e-6, 1e8)
             # Full per-sample linear predictor (intercept + covariate slopes), not just
