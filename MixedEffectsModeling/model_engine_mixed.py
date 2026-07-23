@@ -32,6 +32,7 @@ class GeneRecordMixed:
     disp_coef: np.ndarray = None
     fail_reason: str = ""
     mean_hc: float = None
+    fixed_alpha: float = None
 
 
 class NormativeModelEngineMixed:
@@ -102,6 +103,7 @@ class NormativeModelEngineMixed:
         for g, row in results.iterrows():
             rec = self.genes[g]
             rec.stage, rec.ok, rec.singular, rec.tau2 = row["stage"], bool(row["ok"]), bool(row["singular"]), float(row["tau2"])
+            rec.fixed_alpha = float(row["fixed_alpha"]) if "fixed_alpha" in row and not pd.isna(row["fixed_alpha"]) else None
             rec.mu_coef = row[[c for c in results.columns if c.startswith("mu_coef_")]].values.astype(float)
             rec.disp_coef = row[[c for c in results.columns if c.startswith("disp_coef_")]].values.astype(float)
             rec.fail_reason = row["fail_reason"]
@@ -142,7 +144,8 @@ class NormativeModelEngineMixed:
 
         n_hc = self.X_hc_scaled.shape[0]
         self.rare_glm = {"family": fit["family"], "beta": np.asarray(fit["beta"]),
-                         "alpha": fit["alpha"], "eps": 1.0 / (2 * n_hc)}
+                         "alpha": fit["alpha"], "eps": 1.0 / (2 * n_hc),
+                         "mult_lo": fit["mult_lo"], "mult_hi": fit["mult_hi"]}
         for g, m in zip(fit["gene"], fit["mean_hc"]):
             rec = self.genes[g]
             rec.mean_hc, rec.ok, rec.stage = float(m), True, "pool"
@@ -167,7 +170,13 @@ class NormativeModelEngineMixed:
                 # (fit_pooled_glmm's offset + fixed-effect formula). No random-batch
                 # marginalization here -- fit_pooled_glmm doesn't return tau2 (out of
                 # this fix's scope; see judgment-call note in the fix report).
-                mu = np.clip((rec.mean_hc + self.rare_glm["eps"]) * np.exp(Xa @ self.rare_glm["beta"]), 1e-6, 1e8)
+                # Covariate multiplier (slopes only, intercept excluded) clipped to the
+                # HC-observed [0.1, 99.9] pct range -- mirrors Modeling/model_engine.py's
+                # _rare_z() clip so an OOD-adjacent sample can't extrapolate mu wildly.
+                mult = np.exp(X_test @ self.rare_glm["beta"][1:])
+                if "mult_lo" in self.rare_glm and self.rare_glm["mult_lo"] is not None:
+                    mult = np.clip(mult, self.rare_glm["mult_lo"], self.rare_glm["mult_hi"])
+                mu = np.clip((rec.mean_hc + self.rare_glm["eps"]) * np.exp(self.rare_glm["beta"][0]) * mult, 1e-6, 1e8)
                 if self.rare_glm["family"] == "poisson":
                     Z[:, j] = _poisson_rqr(Y_test[:, j].astype(np.float64), mu, seed + j)
                 else:
@@ -180,6 +189,12 @@ class NormativeModelEngineMixed:
             # alone silently flattened dispersion for every stage-nbi gene.
             if not np.all(np.isnan(rec.disp_coef)):
                 alpha = np.exp(-Xa @ np.nan_to_num(rec.disp_coef, nan=0.0))
+            elif rec.fixed_alpha is not None:
+                # nb_fixed/intercept: dispersion fixed at TRAINING time from the trend
+                # evaluated at the training mean -- reuse that value verbatim rather than
+                # recomputing from the scored batch's own mean (which would make
+                # dispersion depend on the cohort being scored).
+                alpha = np.full(len(X_test), rec.fixed_alpha)
             else:
                 alpha = np.full(len(X_test), self.alpha_fn(float(mu.mean())))
             Z[:, j] = marginal_nb_rqr(Y_test[:, j].astype(np.float64), mu, alpha, rec.tau2, seed + j)

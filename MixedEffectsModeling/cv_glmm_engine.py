@@ -1,3 +1,4 @@
+import pickle
 import subprocess
 import sys
 from pathlib import Path
@@ -71,18 +72,36 @@ def main():
             # (see task-7-report.md's "Finding 1" post-review fix).
             if not np.all(np.isnan(disp_coef)):
                 alpha = np.exp(-Xa_te @ np.nan_to_num(disp_coef, nan=0.0))
+            elif "fixed_alpha" in row.index and not pd.isna(row["fixed_alpha"]):
+                # nb_fixed/intercept: reuse the fold-training-mean fixed dispersion
+                # from this fold's refit, not the held-out fold's own mean -- matches
+                # model_engine_mixed.py's score() fix (same bug class).
+                alpha = np.full(len(te), float(row["fixed_alpha"]))
             else:
                 alpha = np.full(len(te), e2.alpha_fn(float(mu.mean())))
             y_te = e2.Y_hc[te, e2._gene_col[g]]
-            z = marginal_nb_rqr(y_te, mu, alpha, float(row["tau2"]), seed=42 + fi)
-            rows.append(dict(gene=g, fold=fi, z=z))
+            tau2 = float(row["tau2"])
+            z = marginal_nb_rqr(y_te, mu, alpha, tau2, seed=42 + fi)
+            # y/mu/alpha/tau2 kept per held-out sample (not just z) so a later PPC
+            # step can simulate without rerunning the ~3h R fit. tau2 broadcast per
+            # fold since it's a fold-level refit, not per-sample.
+            rows.append(dict(gene=g, fold=fi, y=y_te.astype(np.float32), mu=mu.astype(np.float32),
+                             alpha=np.asarray(alpha, dtype=np.float32),
+                             tau2=np.full(len(te), tau2, dtype=np.float32), z=z))
 
     zdict = {}
+    ppc_dict = {}
     for g in summary.index:
-        zs = [r["z"] for r in rows if r["gene"] == g]
-        if not zs:
+        grecs = [r for r in rows if r["gene"] == g]
+        if not grecs:
             continue
-        zdict[g] = np.concatenate(zs)
+        zdict[g] = np.concatenate([r["z"] for r in grecs])
+        ppc_dict[g] = dict(
+            y=np.concatenate([r["y"] for r in grecs]),
+            mu=np.concatenate([r["mu"] for r in grecs]),
+            alpha=np.concatenate([r["alpha"] for r in grecs]),
+            tau2=np.concatenate([r["tau2"] for r in grecs]),
+            family="negbin", stage=summary.loc[g, "stage"])
 
     stats = []
     for g, z in zdict.items():
@@ -97,8 +116,12 @@ def main():
                           skew_z=float(skew(v)), kurt_z=float(kurtosis(v)), n_valid=len(v)))
     df = pd.DataFrame(stats)
     df.to_csv(out_dir / "cv_stats.csv", index=False)
+    with open(out_dir / "cv_zscores.pkl", "wb") as f:
+        pickle.dump(zdict, f)
+    with open(out_dir / "cv_ppc.pkl", "wb") as f:
+        pickle.dump(ppc_dict, f)
     print(df.groupby("stage")[["w1", "mean_z", "std_z"]].median().to_string())
-    print(f"Saved -> {out_dir}/cv_stats.csv")
+    print(f"Saved -> {out_dir}/cv_stats.csv, cv_zscores.pkl, cv_ppc.pkl")
 
 
 if __name__ == "__main__":

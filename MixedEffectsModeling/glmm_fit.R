@@ -44,7 +44,10 @@ fit_one_cascade <- function(g) {
   for (stage in c("nbi", "nbi_disp_intercept", "nb_fixed", "intercept")) {
     pr <- if (stage == "nbi") priors_df else NULL
     r <- fit_stage_gene(y, safe_names, X, batch, stage, fixed_log_theta, pr, BETA_EXPLODE_THR, TAU2_MAX)
-    if (isTRUE(r$ok) || stage == "intercept") { gc(); return(c(list(gene = g), r)) }
+    # fixed_alpha = the trend-derived dispersion baked into nb_fixed/intercept's
+    # offset at TRAINING time (from training mean(y)). Persisted so scoring uses
+    # this fixed value instead of recomputing from the scored batch's own mean.
+    if (isTRUE(r$ok) || stage == "intercept") { gc(); return(c(list(gene = g, fixed_alpha = alpha_g), r)) }
   }
 }
 
@@ -55,7 +58,7 @@ fit_one_fixed <- function(g) {
   fixed_log_theta <- rep(-log(alpha_g), length(y))
   pr <- if (stage == "nbi") priors_df else NULL
   r <- fit_stage_gene(y, safe_names, X, batch, stage, fixed_log_theta, pr, BETA_EXPLODE_THR, TAU2_MAX)
-  gc(); c(list(gene = g), r)
+  gc(); c(list(gene = g, fixed_alpha = alpha_g), r)
 }
 
 worker <- if (opt$mode == "cascade") fit_one_cascade else fit_one_fixed
@@ -69,7 +72,7 @@ for (i in seq_along(chunks)) {
     mu_padded <- c(r$mu_coef, rep(NA, p - length(r$mu_coef)))[1:p]
     disp_padded <- c(r$disp_coef, rep(NA, p - length(r$disp_coef)))[1:p]
     row <- c(list(gene = r$gene, stage = r$stage, ok = r$ok, singular = r$singular,
-                 tau2 = r$tau2, fail_reason = r$fail_reason))
+                 tau2 = r$tau2, fixed_alpha = r$fixed_alpha, fail_reason = r$fail_reason))
     for (j in seq_len(p)) { row[[paste0("mu_coef_", j-1)]] <- mu_padded[j]; row[[paste0("disp_coef_", j-1)]] <- disp_padded[j] }
     row
   })

@@ -28,6 +28,8 @@ fit <- fit_pooled_glmm(Y, X, batch, mean_hc, eps, opt$`rare-overdisp-thr`)
 out <- list(ok = isTRUE(fit$ok), family = if (isTRUE(fit$ok)) fit$family else NA,
            beta = if (isTRUE(fit$ok)) as.numeric(fit$beta) else numeric(0),
            alpha = if (isTRUE(fit$ok) && !is.na(fit$alpha)) as.numeric(fit$alpha) else NA,
+           mult_lo = if (isTRUE(fit$ok)) as.numeric(fit$mult_lo) else NA,
+           mult_hi = if (isTRUE(fit$ok)) as.numeric(fit$mult_hi) else NA,
            eps = eps, gene = genes, mean_hc = as.numeric(mean_hc))
 write(toJSON(out, auto_unbox = TRUE, na = "null"), opt$out)
 cat("DONE\n")

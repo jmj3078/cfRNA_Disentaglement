@@ -21,45 +21,9 @@ priors_df <- if (use_priors) data.frame(prior = "normal(0, 0.05)", class = "beta
 
 # Mirrors MixedEffectsModeling/config.py's SPIKE_PARAMS["beta_explode_thr"] (which in turn
 # mirrors the root project's config.MODELING_PARAMS["beta_explode_thr"] convention). R and
-# Python config are kept fully separate by design in this spike, so this is duplicated here.
 BETA_EXPLODE_THR <- 3.0
-
-# Reused threshold, not a separately derived one: BETA_EXPLODE_THR is calibrated as a
-# regression-slope explosion check (log(mu) change per SD of a standardized covariate),
-# which is not the same quantity as a random-intercept's total spread (sd(b)). Squaring
-# it to get a tau2 cutoff is a convenience borrow -- picking the project's one existing
-# "implausible magnitude" convention for consistency -- not a statistically derived bound.
-# sd(b)=3 already implies e^{+-6}-fold batch swings, which is implausible enough on its
-# own to justify treating tau2 >= 9 as non-identifiable regardless of the exact number.
 TAU2_MAX <- BETA_EXPLODE_THR^2
 
-# Principled convergence/singularity check based on TMB's own positive-definite-Hessian
-# diagnostic (fit$sdr$pdHess), rather than fragile string-matching on R warning text.
-#
-# Explosion is checked FIRST and unconditionally, on SLOPES ONLY (both submodels'
-# intercepts excluded), before branching on pdHess at all: a positive-definite Hessian
-# around an exploded slope coefficient does not make that coefficient trustworthy, and a
-# low-expression gene's log(mu)/log(theta) INTERCEPT is legitimately large-negative, not a
-# sign of instability -- this mirrors the project's established beta_explode convention
-# (Modeling/model_engine.py's beta[1:], Modeling/gamlss.r's "sigma intercept: no penalty"
-# comment), which always excludes the intercept from this kind of magnitude check.
-#
-# tau2 is extracted positionally (VarCorr(fit)$cond[[1]]), not via the grouping variable's
-# literal name, since this model design only ever has exactly one random-effect grouping
-# term regardless of what it happens to be named in the formula.
-#
-# pdHess FALSE does not always mean a genuine optimizer failure: a batch variance
-# component (tau2) estimated at/near the zero boundary makes the Hessian look
-# non-positive-definite purely because the parameter sits at the edge of its domain --
-# a normal, expected "boundary singular fit" outcome for genes with no real batch effect.
-# We rescue that case as converged (singular = TRUE, tau2 forced to exactly 0) provided the
-# slopes already passed the explosion check above.
-# Conversely, pdHess TRUE is not sufficient either: a Hessian can look positive-definite
-# while tau2 itself has blown up to an implausible magnitude (a handful of extreme-n
-# batches -- this pilot's HC batches range from n=1 to n=116 -- can pull the optimizer to
-# a huge batch-variance estimate that the Hessian still certifies as a local optimum). We
-# treat tau2 >= tau2_max as non-identifiable and refuse to trust it downstream, exactly as
-# we already refuse to trust an exploding fixed-effect slope.
 is_converged <- function(fit, beta_explode_thr, tau2_max) {
   if (inherits(fit, "try-error")) return(list(ok = FALSE, singular = NA, tau2 = NA))
 

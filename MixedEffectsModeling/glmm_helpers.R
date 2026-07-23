@@ -68,14 +68,26 @@ fit_pooled_glmm <- function(Y_block, X, batch, mean_hc, eps, rare_overdisp_thr) 
   df$off__ <- log(mean_hc[gene_idx] + eps)
   mu_fml <- as.formula(paste("y__ ~ offset(off__) +", paste(safe_names, collapse = " + "), "+ (1 | batch__)"))
 
+  # Covariate-multiplier clip bounds from the HC-observed range (slopes only,
+  # intercept excluded); mirrors Modeling/model_engine.py's train_rare() clip
+  # -- guards scoring-time extrapolation for OOD-adjacent covariates.
+  mult_clip <- function(beta) list(
+    mult_lo = as.numeric(quantile(exp(X %*% beta[-1]), 0.001)),
+    mult_hi = as.numeric(quantile(exp(X %*% beta[-1]), 0.999)))
+
   fit_pois <- tryCatch(glmmTMB(mu_fml, family = poisson(), data = df), error = function(e) NULL)
   if (is.null(fit_pois)) return(list(ok = FALSE))
   ratio <- sum(residuals(fit_pois, type = "pearson")^2) / df.residual(fit_pois)
   if (ratio <= rare_overdisp_thr) {
-    return(list(ok = TRUE, family = "poisson", beta = as.numeric(fixef(fit_pois)$cond), alpha = NA))
+    beta <- as.numeric(fixef(fit_pois)$cond)
+    mc <- mult_clip(beta)
+    return(list(ok = TRUE, family = "poisson", beta = beta, alpha = NA, mult_lo = mc$mult_lo, mult_hi = mc$mult_hi))
   }
   fit_nb <- tryCatch(glmmTMB(mu_fml, family = nbinom2(), data = df), error = function(e) NULL)
   if (is.null(fit_nb)) return(list(ok = FALSE))
-  list(ok = TRUE, family = "negbin", beta = as.numeric(fixef(fit_nb)$cond),
-      alpha = exp(-fixef(fit_nb)$disp[["(Intercept)"]]))  # theta->sigma reciprocal, same convention
+  beta <- as.numeric(fixef(fit_nb)$cond)
+  mc <- mult_clip(beta)
+  list(ok = TRUE, family = "negbin", beta = beta,
+      alpha = exp(-fixef(fit_nb)$disp[["(Intercept)"]]),  # theta->sigma reciprocal, same convention
+      mult_lo = mc$mult_lo, mult_hi = mc$mult_hi)
 }
