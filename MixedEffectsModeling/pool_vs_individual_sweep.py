@@ -1,4 +1,5 @@
 import json
+import pickle
 import subprocess
 import sys
 from pathlib import Path
@@ -41,23 +42,32 @@ def load_hc():
     return Xs, Y, batch, gene_names
 
 
-def individual_cascade_ll(Xs, Y, batch, gene_names, genes, folds, tmp):
-    """Fit each gene's own full demotion cascade (glmm_fit.R --mode cascade)
-    per fold -- independent of any pooling threshold, so this runs ONCE on the
-    superset of genes and is reused for every threshold in the sweep."""
+def individual_cascade_ppc(Xs, Y, batch, gene_names, genes, stage_of, folds, tmp):
+    """Refit each gene at its ALREADY-KNOWN stage (engine_state_mixed/training_summary.csv,
+    from the Task 6a full-data cascade) via glmm_fit.R --mode fixed_stage -- same
+    convention already validated in cv_glmm_engine.py's cv_model_route(). Re-searching
+    the demotion chain from scratch per fold (--mode cascade) would be redundant: the
+    full-data fit already tells us which stage each gene converges to, and fixed_stage
+    is the cheaper, already-proven way to refit it per fold. Runs ONCE on the superset
+    of genes, independent of any pooling threshold, and is reused for every threshold.
+
+    Returns dict[gene] = dict(y, mu, alpha, tau2, family, stage) -- same per-sample
+    schema as cv_glmm_engine.py's cv_ppc.pkl, so downstream PPC/log-likelihood
+    re-diagnosis never needs to rerun the R fits."""
     Path(tmp).mkdir(parents=True, exist_ok=True)
     name2col = {g: i for i, g in enumerate(gene_names)}
-    ll_by_gene = {g: [] for g in genes}
+    parts = {g: [] for g in genes}
     for fi, (tr, te) in enumerate(folds):
         pd.DataFrame(Xs[tr], columns=config.BIAS_COLUMNS).to_csv(f"{tmp}/X_{fi}.csv.gz")
         Y_tr = Y[tr][:, [name2col[g] for g in genes]]
         pd.DataFrame(Y_tr, columns=genes).to_csv(f"{tmp}/Y_{fi}.csv.gz")
         pd.DataFrame({"Batch_ID": batch[tr]}).to_csv(f"{tmp}/batch_{fi}.csv.gz")
-        pd.DataFrame({"gene": genes}).to_csv(f"{tmp}/genes_{fi}.csv", index=False)
+        pd.DataFrame({"gene": genes, "stage": [stage_of[g] for g in genes]}).to_csv(
+            f"{tmp}/genes_{fi}.csv", index=False)
         subprocess.run([
             "Rscript", str(config.GLMM_FIT_R), "--x", f"{tmp}/X_{fi}.csv.gz", "--y", f"{tmp}/Y_{fi}.csv.gz",
             "--batch", f"{tmp}/batch_{fi}.csv.gz", "--genes", f"{tmp}/genes_{fi}.csv",
-            "--trend", str(config.DISPERSION_TREND_PATH), "--mode", "cascade", "--out", f"{tmp}/res_{fi}.csv",
+            "--trend", str(config.DISPERSION_TREND_PATH), "--mode", "fixed_stage", "--out", f"{tmp}/res_{fi}.csv",
         ], check=True, cwd=str(config.GLMM_FIT_R.parent))
 
         fold_fits = pd.read_csv(f"{tmp}/res_{fi}.csv").set_index("gene")
@@ -76,15 +86,25 @@ def individual_cascade_ll(Xs, Y, batch, gene_names, genes, folds, tmp):
             else:
                 continue  # should not happen: cascade always resolves fixed_alpha by "intercept"
             y_te = Y[te, name2col[g]]
-            ll = marginal_nb_loglik(y_te, mu, alpha, float(row["tau2"]))
-            ll_by_gene[g].append(ll)
-    return {g: np.concatenate(v) for g, v in ll_by_gene.items() if v}
+            parts[g].append(dict(y=y_te.astype(np.float32), mu=mu.astype(np.float32),
+                                 alpha=np.asarray(alpha, dtype=np.float32),
+                                 tau2=np.full(len(te), float(row["tau2"]), dtype=np.float32)))
+    ppc = {}
+    for g, ps in parts.items():
+        if not ps:
+            continue
+        ppc[g] = dict(y=np.concatenate([p["y"] for p in ps]), mu=np.concatenate([p["mu"] for p in ps]),
+                      alpha=np.concatenate([p["alpha"] for p in ps]), tau2=np.concatenate([p["tau2"] for p in ps]),
+                      family="negbin", stage=stage_of[g])
+    return ppc
 
 
-def pooled_ll_at_threshold(Xs, Y, batch, gene_names, genes, folds, tmp):
+def pooled_ppc_at_threshold(Xs, Y, batch, gene_names, genes, folds, tmp):
+    """Returns dict[gene] = dict(y, mu, alpha, tau2, family, stage='pool'), same
+    per-sample schema as individual_cascade_ppc / cv_glmm_engine.py's cv_ppc.pkl."""
     Path(tmp).mkdir(parents=True, exist_ok=True)
     name2col = {g: i for i, g in enumerate(gene_names)}
-    ll_by_gene = {g: [] for g in genes}
+    parts = {g: [] for g in genes}
     for fi, (tr, te) in enumerate(folds):
         pd.DataFrame(Xs[tr], columns=config.BIAS_COLUMNS).to_csv(f"{tmp}/Xp_{fi}.csv.gz")
         Y_tr = Y[tr][:, [name2col[g] for g in genes]]
@@ -109,13 +129,25 @@ def pooled_ll_at_threshold(Xs, Y, batch, gene_names, genes, folds, tmp):
         mult = np.exp(Xte @ beta[1:])
         if fit.get("mult_lo") is not None:
             mult = np.clip(mult, fit["mult_lo"], fit["mult_hi"])
+        alpha_val = 1e-6 if fit["family"] == "poisson" else fit["alpha"]  # ~Poisson limit
         for g in genes:
             mu = np.clip((mean_hc[g] + eps) * np.exp(beta[0]) * mult, 1e-6, 1e8)
             y_te = Y[te, name2col[g]]
-            alpha = 1e-6 if fit["family"] == "poisson" else fit["alpha"]  # ~Poisson limit
-            ll = marginal_nb_loglik(y_te, mu, alpha, tau2)
-            ll_by_gene[g].append(ll)
-    return {g: np.concatenate(v) for g, v in ll_by_gene.items() if v}
+            parts[g].append(dict(y=y_te.astype(np.float32), mu=mu.astype(np.float32),
+                                 alpha=np.full(len(te), alpha_val, dtype=np.float32),
+                                 tau2=np.full(len(te), tau2, dtype=np.float32)))
+    ppc = {}
+    for g, ps in parts.items():
+        if not ps:
+            continue
+        ppc[g] = dict(y=np.concatenate([p["y"] for p in ps]), mu=np.concatenate([p["mu"] for p in ps]),
+                      alpha=np.concatenate([p["alpha"] for p in ps]), tau2=np.concatenate([p["tau2"] for p in ps]),
+                      family="negbin", stage="pool")
+    return ppc
+
+
+def _mean_ll(ppc_gene):
+    return float(marginal_nb_loglik(ppc_gene["y"], ppc_gene["mu"], ppc_gene["alpha"], ppc_gene["tau2"]).mean())
 
 
 def main():
@@ -126,30 +158,38 @@ def main():
     superset = gene_names[nz < max_t].tolist()
     print(f"Superset (nz<{max_t}): {len(superset)} genes")
 
+    summary = pd.read_csv(config.ENGINE_MIXED_DIR / "training_summary.csv", index_col="gene")
+    stage_of = summary["stage"].to_dict()
+    superset = [g for g in superset if g in stage_of]  # need a known stage to refit fixed_stage
+
     n_hc = Xs.shape[0]
     folds = list(StratifiedKFold(MP["n_splits"], shuffle=True, random_state=42).split(np.zeros(n_hc), batch))
 
-    print("Fitting individual per-gene cascade (once, reused across all thresholds)...")
-    ll_individual = individual_cascade_ll(Xs, Y, batch, gene_names, superset, folds, f"{TMP}/individual")
-    print(f"  {len(ll_individual)}/{len(superset)} genes converged individually (some resolve to intercept)")
+    print("Fitting individual per-gene cascade at its known stage (once, reused across all thresholds)...")
+    ppc_individual = individual_cascade_ppc(Xs, Y, batch, gene_names, superset, stage_of, folds, f"{TMP}/individual")
+    print(f"  {len(ppc_individual)}/{len(superset)} genes converged individually (some resolve to intercept)")
+    ll_individual = {g: _mean_ll(d) for g, d in ppc_individual.items()}
 
     rows, gene_rows = [], []
+    ppc_pooled_by_threshold = {}
     nz_map = dict(zip(gene_names, nz))
     for T in THRESHOLDS:
         genes_t = [g for g in superset if nz_map[g] < T]
         if len(genes_t) < 5:
             continue
         print(f"Pooled fit for nz<{T} ({len(genes_t)} genes)...")
-        ll_pooled = pooled_ll_at_threshold(Xs, Y, batch, gene_names, genes_t, folds, f"{TMP}/pooled_{T}")
+        ppc_pooled = pooled_ppc_at_threshold(Xs, Y, batch, gene_names, genes_t, folds, f"{TMP}/pooled_{T}")
+        ppc_pooled_by_threshold[T] = ppc_pooled
+        ll_pooled = {g: _mean_ll(d) for g, d in ppc_pooled.items()}
 
         diffs = []
         for g in genes_t:
             if g not in ll_individual or g not in ll_pooled:
                 continue
-            d = float(ll_individual[g].mean() - ll_pooled[g].mean())
+            d = ll_individual[g] - ll_pooled[g]
             diffs.append(d)
-            gene_rows.append(dict(nz_threshold=T, gene=g, ll_individual=float(ll_individual[g].mean()),
-                                  ll_pooled=float(ll_pooled[g].mean()), ll_diff=d))
+            gene_rows.append(dict(nz_threshold=T, gene=g, ll_individual=ll_individual[g],
+                                  ll_pooled=ll_pooled[g], ll_diff=d))
         diffs = np.array(diffs)
         frac_individual_wins = float((diffs > 0).mean())
         rows.append(dict(nz_threshold=T, n_genes=len(diffs), median_ll_diff=float(np.median(diffs)),
@@ -161,6 +201,14 @@ def main():
     gene_df = pd.DataFrame(gene_rows)
     df.to_csv(OUT / "pool_vs_individual_summary.csv", index=False)
     gene_df.to_csv(OUT / "pool_vs_individual_gene_level.csv", index=False)
+
+    # Raw per-sample y/mu/alpha/tau2, same schema as cv_glmm_engine.py's cv_ppc.pkl --
+    # lets later PPC/log-likelihood re-diagnosis (e.g. via ppc_mixed.py's simulate_mixed)
+    # run against cached data instead of rerunning the R fits.
+    with open(OUT / "pool_vs_individual_ppc_individual.pkl", "wb") as f:
+        pickle.dump(ppc_individual, f)
+    with open(OUT / "pool_vs_individual_ppc_pooled.pkl", "wb") as f:
+        pickle.dump(ppc_pooled_by_threshold, f)
 
     apply_style()
     import matplotlib.pyplot as plt
@@ -174,8 +222,9 @@ def main():
     axes[1].set(xlabel="Pooling threshold (HC nonzero count)", ylabel="Fraction of genes where individual wins")
     fig.tight_layout()
     fig.savefig(config.THRESHOLD_SWEEP_FIG_DIR / "pool_vs_individual.png", dpi=150)
-    print(f"Saved -> {OUT}/pool_vs_individual_summary.csv, "
-         f"{OUT}/pool_vs_individual_gene_level.csv, {config.THRESHOLD_SWEEP_FIG_DIR}/pool_vs_individual.png")
+    print(f"Saved -> {OUT}/pool_vs_individual_summary.csv, {OUT}/pool_vs_individual_gene_level.csv, "
+         f"{OUT}/pool_vs_individual_ppc_individual.pkl, {OUT}/pool_vs_individual_ppc_pooled.pkl, "
+         f"{config.THRESHOLD_SWEEP_FIG_DIR}/pool_vs_individual.png")
 
 
 if __name__ == "__main__":

@@ -51,12 +51,15 @@ def _nb_logpmf(y, mu, alpha):
 # y relative to mu barely moved w1 on real pool-route genes). Log-likelihood
 # doesn't have that blind spot -- a wrong mu strictly costs probability mass.
 def marginal_nb_loglik(y, mu, alpha, tau2, n_nodes=7):
+    # tau2 may be scalar or per-sample array (e.g. concatenated across CV folds
+    # with different fold-level tau2 estimates) -- sd broadcasts elementwise.
     y = np.asarray(y)
-    if tau2 < 1e-6:
+    tau2 = np.asarray(tau2, dtype=np.float64)
+    if np.all(tau2 < 1e-6):
         return _nb_logpmf(y, mu, alpha)
     nodes, weights = hermegauss(n_nodes)
     weights = weights / weights.sum()
-    sd = np.sqrt(tau2)
+    sd = np.sqrt(np.maximum(tau2, 0.0))
     logpmf_k = np.stack([
         _nb_logpmf(y, mu * np.exp(sd * node), alpha) + np.log(w)
         for node, w in zip(nodes, weights)

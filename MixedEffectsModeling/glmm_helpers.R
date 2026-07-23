@@ -10,12 +10,25 @@ sanitize_names <- function(names) {
 safe_max_abs <- function(x) if (length(x) == 0) 0 else max(abs(x))
 
 # Slopes only (intercept excluded, matches Modeling/model_engine.py's beta[1:]
-# convention); explosion checked before pdHess branching, in either submodel.
-is_converged <- function(fit, beta_explode_thr, tau2_max) {
+# convention) for the MEAN submodel -- a very negative mean intercept is
+# legitimate for a low-expression gene. explosion checked before pdHess
+# branching, in either submodel.
+#
+# The DISPERSION intercept is checked separately (disp_intercept_max), not
+# folded into beta_max: an exploded disp intercept collapses alpha to ~0
+# (near-deterministic NB, no overdispersion) while its slopes stay ~0 --
+# passes every other check (pdHess, tau2 bound) and was silently marked
+# ok=TRUE, then produced catastrophic held-out log-likelihoods (~-80000/obs)
+# under pool_vs_individual_sweep.py. Empirically bimodal: normal fits cluster
+# in [-5, -0.6], degenerate ones jump to [17, 31] with a clean gap between --
+# disp_intercept_max=10 sits in that gap.
+is_converged <- function(fit, beta_explode_thr, tau2_max, disp_intercept_max) {
   if (inherits(fit, "try-error")) return(list(ok = FALSE, singular = NA, tau2 = NA))
   beta_max <- safe_max_abs(c(fixef(fit)$cond[-1], fixef(fit)$disp[-1]))
+  disp0 <- fixef(fit)$disp[1]
   tau2 <- as.numeric(VarCorr(fit)$cond[[1]][1, 1])
   if (isTRUE(beta_max >= beta_explode_thr)) return(list(ok = FALSE, singular = NA, tau2 = tau2))
+  if (length(disp0) > 0 && isTRUE(abs(disp0) >= disp_intercept_max)) return(list(ok = FALSE, singular = NA, tau2 = tau2))
   if (isTRUE(fit$sdr$pdHess)) {
     if (isTRUE(tau2 >= tau2_max)) return(list(ok = FALSE, singular = NA, tau2 = tau2))
     return(list(ok = TRUE, singular = FALSE, tau2 = tau2))
@@ -26,7 +39,7 @@ is_converged <- function(fit, beta_explode_thr, tau2_max) {
 
 # Fits ONE stage for ONE gene. Caller (glmm_fit.R) drives the demotion order.
 fit_stage_gene <- function(y, safe_names, X, batch, stage, fixed_log_theta,
-                           priors_df, beta_explode_thr, tau2_max) {
+                           priors_df, beta_explode_thr, tau2_max, disp_intercept_max) {
   df <- as.data.frame(X); colnames(df) <- safe_names
   df$y__ <- as.integer(round(y))
   df$batch__ <- factor(batch)
@@ -48,7 +61,7 @@ fit_stage_gene <- function(y, safe_names, X, batch, stage, fixed_log_theta,
     return(list(stage = stage, ok = FALSE, singular = NA, tau2 = NA,
                mu_coef = numeric(0), disp_coef = numeric(0), fail_reason = as.character(fit)))
   }
-  conv <- is_converged(fit, beta_explode_thr, tau2_max)
+  conv <- is_converged(fit, beta_explode_thr, tau2_max, disp_intercept_max)
   list(stage = stage, ok = conv$ok, singular = conv$singular, tau2 = conv$tau2,
       mu_coef = as.numeric(fixef(fit)$cond), disp_coef = as.numeric(fixef(fit)$disp),
       fail_reason = if (conv$ok) "" else "not_converged_or_explosion_or_tau2_bound")

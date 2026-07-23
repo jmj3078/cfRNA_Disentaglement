@@ -32,6 +32,7 @@ safe_names <- sanitize_names(colnames(X))
 colnames(X) <- safe_names
 BETA_EXPLODE_THR <- 3.0
 TAU2_MAX <- BETA_EXPLODE_THR^2
+DISP_INTERCEPT_MAX <- 10.0
 priors_df <- data.frame(prior = "normal(0, 0.05)", class = "betad", coef = "")
 
 done_genes <- character(0)
@@ -43,7 +44,7 @@ fit_one_cascade <- function(g) {
   fixed_log_theta <- rep(-log(alpha_g), length(y))
   for (stage in c("nbi", "nbi_disp_intercept", "nb_fixed", "intercept")) {
     pr <- if (stage == "nbi") priors_df else NULL
-    r <- fit_stage_gene(y, safe_names, X, batch, stage, fixed_log_theta, pr, BETA_EXPLODE_THR, TAU2_MAX)
+    r <- fit_stage_gene(y, safe_names, X, batch, stage, fixed_log_theta, pr, BETA_EXPLODE_THR, TAU2_MAX, DISP_INTERCEPT_MAX)
     # fixed_alpha = the trend-derived dispersion baked into nb_fixed/intercept's
     # offset at TRAINING time (from training mean(y)). Persisted so scoring uses
     # this fixed value instead of recomputing from the scored batch's own mean.
@@ -57,7 +58,7 @@ fit_one_fixed <- function(g) {
   alpha_g <- alpha_of(mean(y))
   fixed_log_theta <- rep(-log(alpha_g), length(y))
   pr <- if (stage == "nbi") priors_df else NULL
-  r <- fit_stage_gene(y, safe_names, X, batch, stage, fixed_log_theta, pr, BETA_EXPLODE_THR, TAU2_MAX)
+  r <- fit_stage_gene(y, safe_names, X, batch, stage, fixed_log_theta, pr, BETA_EXPLODE_THR, TAU2_MAX, DISP_INTERCEPT_MAX)
   gc(); c(list(gene = g, fixed_alpha = alpha_g), r)
 }
 
