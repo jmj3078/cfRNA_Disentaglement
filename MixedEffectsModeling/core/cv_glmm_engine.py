@@ -9,11 +9,11 @@ import pandas as pd
 from scipy.stats import kurtosis, norm, skew
 from sklearn.model_selection import StratifiedKFold
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 import MixedEffectsModeling.config as config
-from MixedEffectsModeling.dispersion_trend import load_trend
-from MixedEffectsModeling.marginal_rqr import _poisson_rqr, marginal_nb_rqr
-from MixedEffectsModeling.model_engine_mixed import NormativeModelEngineMixed
+from MixedEffectsModeling.core.dispersion_trend import load_trend
+from MixedEffectsModeling.core.marginal_rqr import _poisson_rqr, marginal_nb_rqr
+from MixedEffectsModeling.core.model_engine_mixed import NormativeModelEngineMixed
 
 MP = config.SPIKE_PARAMS
 # Copied from Modeling/model_engine.py's _w1_normal (mean abs deviation vs

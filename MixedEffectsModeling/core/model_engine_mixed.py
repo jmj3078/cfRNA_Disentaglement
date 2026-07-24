@@ -11,10 +11,10 @@ import scanpy as sc
 from scipy.sparse import issparse
 from sklearn.preprocessing import StandardScaler
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 import MixedEffectsModeling.config as config
-from MixedEffectsModeling.dispersion_trend import build_trend, load_trend, save_trend
-from MixedEffectsModeling.marginal_rqr import _poisson_rqr, marginal_nb_rqr
+from MixedEffectsModeling.core.dispersion_trend import build_trend, load_trend, save_trend
+from MixedEffectsModeling.core.marginal_rqr import _poisson_rqr, marginal_nb_rqr
 
 MP = config.SPIKE_PARAMS
 

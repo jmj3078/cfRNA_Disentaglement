@@ -7,10 +7,10 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import StratifiedKFold
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 import MixedEffectsModeling.config as config
-from MixedEffectsModeling.marginal_rqr import marginal_nb_rqr
-from MixedEffectsModeling.pool_vs_individual_sweep import load_hc
+from MixedEffectsModeling.core.marginal_rqr import marginal_nb_rqr
+from MixedEffectsModeling.validation.pool_vs_individual_sweep import load_hc
 from viz_style import apply_style
 
 OUT = config.THRESHOLD_SWEEP_DIR

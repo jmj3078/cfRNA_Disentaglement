@@ -11,9 +11,9 @@ from scipy.sparse import issparse
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 import MixedEffectsModeling.config as config
-from MixedEffectsModeling.marginal_rqr import marginal_nb_loglik
+from MixedEffectsModeling.core.marginal_rqr import marginal_nb_loglik
 from viz_style import apply_style
 
 MP = config.SPIKE_PARAMS

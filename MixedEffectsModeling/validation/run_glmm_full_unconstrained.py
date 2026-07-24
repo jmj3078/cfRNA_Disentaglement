@@ -8,9 +8,9 @@ import scanpy as sc
 from scipy.sparse import issparse
 from sklearn.preprocessing import StandardScaler
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 import MixedEffectsModeling.config as config
-from MixedEffectsModeling.dispersion_trend import build_trend, save_trend
+from MixedEffectsModeling.core.dispersion_trend import build_trend, save_trend
 
 TMP = Path("/tmp/glmm_full_unconstrained")
 TMP.mkdir(exist_ok=True)

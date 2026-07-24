@@ -6,12 +6,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 import MixedEffectsModeling.config as config
-from MixedEffectsModeling.marginal_rqr import _poisson_rqr, marginal_nb_rqr
-from MixedEffectsModeling.pool_vs_individual_sweep import load_hc
-from MixedEffectsModeling.ppc_mixed import simulate_many
-from MixedEffectsModeling.spike_in_power_test import reconstruct_individual_full
+from MixedEffectsModeling.core.marginal_rqr import _poisson_rqr, marginal_nb_rqr
+from MixedEffectsModeling.validation.pool_vs_individual_sweep import load_hc
+from MixedEffectsModeling.validation.ppc_mixed import simulate_many
+from MixedEffectsModeling.validation.spike_in_power_test import reconstruct_individual_full
 from viz_style import apply_style
 
 OUT = config.THRESHOLD_SWEEP_DIR
