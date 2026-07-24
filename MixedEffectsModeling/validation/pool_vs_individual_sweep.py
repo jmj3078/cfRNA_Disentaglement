@@ -43,17 +43,6 @@ def load_hc():
 
 
 def individual_cascade_ppc(Xs, Y, batch, gene_names, genes, stage_of, folds, tmp):
-    """Refit each gene at its ALREADY-KNOWN stage (engine_state_mixed/training_summary.csv,
-    from the Task 6a full-data cascade) via glmm_fit.R --mode fixed_stage -- same
-    convention already validated in cv_glmm_engine.py's cv_model_route(). Re-searching
-    the demotion chain from scratch per fold (--mode cascade) would be redundant: the
-    full-data fit already tells us which stage each gene converges to, and fixed_stage
-    is the cheaper, already-proven way to refit it per fold. Runs ONCE on the superset
-    of genes, independent of any pooling threshold, and is reused for every threshold.
-
-    Returns dict[gene] = dict(y, mu, alpha, tau2, family, stage) -- same per-sample
-    schema as cv_glmm_engine.py's cv_ppc.pkl, so downstream PPC/log-likelihood
-    re-diagnosis never needs to rerun the R fits."""
     Path(tmp).mkdir(parents=True, exist_ok=True)
     name2col = {g: i for i, g in enumerate(gene_names)}
     parts = {g: [] for g in genes}

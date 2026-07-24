@@ -36,15 +36,8 @@ BIAS_COLUMNS = [
 STRATIFY_COL = "Batch_ID"
 
 SPIKE_PARAMS = {
-    "outlier_z": 5.0,
-    "max_outlier_iter": 3,
-    "max_remove_frac": 0.05,
-    "ridge_lambda_sigma": 0.05,
     "beta_explode_thr": 3.0,
-    "gaic_k": 2.0,
-    "n_pilot_genes": 40,
     "seed": 42,
-    "trend_min_nz": 30,
     "rare_overdisp_thr": 2.0,
     "alpha_floor": 1e-2,
     "alpha_cap": 50.0,

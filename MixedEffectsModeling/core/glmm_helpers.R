@@ -8,20 +8,6 @@ sanitize_names <- function(names) {
 }
 
 safe_max_abs <- function(x) if (length(x) == 0) 0 else max(abs(x))
-
-# Slopes only (intercept excluded, matches Modeling/model_engine.py's beta[1:]
-# convention) for the MEAN submodel -- a very negative mean intercept is
-# legitimate for a low-expression gene. explosion checked before pdHess
-# branching, in either submodel.
-#
-# The DISPERSION intercept is checked separately (disp_intercept_max), not
-# folded into beta_max: an exploded disp intercept collapses alpha to ~0
-# (near-deterministic NB, no overdispersion) while its slopes stay ~0 --
-# passes every other check (pdHess, tau2 bound) and was silently marked
-# ok=TRUE, then produced catastrophic held-out log-likelihoods (~-80000/obs)
-# under pool_vs_individual_sweep.py. Empirically bimodal: normal fits cluster
-# in [-5, -0.6], degenerate ones jump to [17, 31] with a clean gap between --
-# disp_intercept_max=10 sits in that gap.
 is_converged <- function(fit, beta_explode_thr, tau2_max, disp_intercept_max) {
   if (inherits(fit, "try-error")) return(list(ok = FALSE, singular = NA, tau2 = NA))
   beta_max <- safe_max_abs(c(fixef(fit)$cond[-1], fixef(fit)$disp[-1]))
