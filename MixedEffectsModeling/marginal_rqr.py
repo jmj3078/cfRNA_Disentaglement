@@ -69,13 +69,17 @@ def marginal_nb_loglik(y, mu, alpha, tau2, n_nodes=7):
 
 
 def marginal_nb_rqr(y, mu, alpha, tau2, seed, n_nodes=7):
+    # tau2 may be scalar or per-sample array (e.g. concatenated across CV folds
+    # with different fold-level tau2 estimates) -- generalized the same way as
+    # marginal_nb_loglik, since sd broadcasts elementwise through the mixture.
     y = np.asarray(y)
-    if tau2 < 1e-6:
+    tau2 = np.asarray(tau2, dtype=np.float64)
+    if np.all(tau2 < 1e-6):
         return _nb_rqr(y, mu, alpha, seed)
 
     nodes, weights = hermegauss(n_nodes)  # integrate against exp(-x^2/2), matches N(0,1)
     weights = weights / weights.sum()
-    sd = np.sqrt(tau2)
+    sd = np.sqrt(np.maximum(tau2, 0.0))
     lo = np.zeros_like(y, dtype=np.float64)
     hi = np.zeros_like(y, dtype=np.float64)
     for node, w in zip(nodes, weights):

@@ -21,7 +21,7 @@ OUT = config.THRESHOLD_SWEEP_DIR
 OUT.mkdir(parents=True, exist_ok=True)
 config.THRESHOLD_SWEEP_FIG_DIR.mkdir(parents=True, exist_ok=True)
 
-THRESHOLDS = [3, 5, 7, 10, 15, 20, 25, 30]
+THRESHOLDS = [3, 5, 7, 10, 15, 20, 25, 30, 50, 75, 100, 150]
 TMP = "/tmp/pool_vs_individual"
 
 

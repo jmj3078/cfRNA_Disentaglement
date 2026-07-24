@@ -66,6 +66,9 @@ worker <- if (opt$mode == "cascade") fit_one_cascade else fit_one_fixed
 genes_todo <- setdiff(gene_meta$gene, done_genes)
 chunks <- split(genes_todo, ceiling(seq_along(genes_todo) / opt$`chunk-size`))
 
+t0 <- Sys.time()
+n_ok_cum <- length(done_genes)  # done_genes from a prior run's --out are assumed ok (resume)
+n_total_cum <- length(done_genes)
 for (i in seq_along(chunks)) {
   results <- mclapply(chunks[[i]], worker, mc.cores = opt$cores)
   rows <- lapply(results, function(r) {
@@ -80,6 +83,14 @@ for (i in seq_along(chunks)) {
   df <- do.call(rbind, lapply(rows, as.data.frame))
   write.table(df, opt$out, sep = ",", append = file.exists(opt$out), col.names = !file.exists(opt$out), row.names = FALSE)
   gc()
-  cat(sprintf("chunk %d/%d done (%d genes)\n", i, length(chunks), length(chunks[[i]])))
+
+  n_ok_cum <- n_ok_cum + sum(df$ok, na.rm = TRUE)
+  n_total_cum <- n_total_cum + nrow(df)
+  elapsed_min <- as.numeric(difftime(Sys.time(), t0, units = "mins"))
+  eta_min <- (length(chunks) - i) * (elapsed_min / i)
+  stage_counts <- paste(sprintf("%s=%d", names(table(df$stage)), table(df$stage)), collapse = ",")
+  cat(sprintf("[%s] chunk %d/%d done (%d genes, ok_rate=%.2f, %s) | elapsed=%.1fmin eta=%.1fmin | cum_ok_rate=%.3f (%d/%d)\n",
+             format(Sys.time(), "%H:%M:%S"), i, length(chunks), nrow(df), mean(df$ok, na.rm = TRUE), stage_counts,
+             elapsed_min, eta_min, n_ok_cum / n_total_cum, n_ok_cum, n_total_cum))
 }
 cat("DONE\n")

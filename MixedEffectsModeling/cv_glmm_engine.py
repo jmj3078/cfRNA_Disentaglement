@@ -16,8 +16,6 @@ from MixedEffectsModeling.marginal_rqr import _poisson_rqr, marginal_nb_rqr
 from MixedEffectsModeling.model_engine_mixed import NormativeModelEngineMixed
 
 MP = config.SPIKE_PARAMS
-
-
 # Copied from Modeling/model_engine.py's _w1_normal (mean abs deviation vs
 # theoretical N(0,1) quantiles) -- duplicate, not an import, per isolation.
 def _w1_normal(z):
