@@ -105,11 +105,12 @@ class NormativeModelEngineMixed:
         results = pd.read_csv(f"{tmp_dir}/results.csv").set_index("gene")
         for g, row in results.iterrows():
             rec = self.genes[g]
-            rec.stage, rec.ok, rec.singular, rec.tau2 = row["stage"], bool(row["ok"]), bool(row["singular"]), float(row["tau2"])
+            rec.stage, rec.ok, rec.tau2 = row["stage"], bool(row["ok"]), float(row["tau2"])
+            rec.singular = bool(row["singular"]) if not pd.isna(row["singular"]) else False
             rec.fixed_alpha = float(row["fixed_alpha"]) if "fixed_alpha" in row and not pd.isna(row["fixed_alpha"]) else None
             rec.mu_coef = row[[c for c in results.columns if c.startswith("mu_coef_")]].values.astype(float)
             rec.disp_coef = row[[c for c in results.columns if c.startswith("disp_coef_")]].values.astype(float)
-            rec.fail_reason = row["fail_reason"]
+            rec.fail_reason = row["fail_reason"] if not pd.isna(row["fail_reason"]) else ""
             rec.nbi_reject_reason = row["nbi_reject_reason"] if not pd.isna(row["nbi_reject_reason"]) else ""
             rec.nbi_disp_intercept_reject_reason = row["nbi_disp_intercept_reject_reason"] if not pd.isna(row["nbi_disp_intercept_reject_reason"]) else ""
             rec.nb_fixed_reject_reason = row["nb_fixed_reject_reason"] if not pd.isna(row["nb_fixed_reject_reason"]) else ""

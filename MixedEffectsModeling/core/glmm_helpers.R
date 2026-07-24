@@ -38,7 +38,8 @@ fit_stage_gene <- function(y, safe_names, X, batch, stage, fixed_log_theta,
   disp_fml <- switch(stage,
     nbi = as.formula(paste("~", paste(safe_names, collapse = " + "))),
     nbi_disp_intercept = as.formula("~ 1"),
-    nb_fixed = as.formula("~ 0 + offset(fixed_log_theta)"))
+    nb_fixed = as.formula("~ 0 + offset(fixed_log_theta)"),
+    stop(sprintf("fit_stage_gene: unknown stage '%s'", stage)))
 
   fit <- tryCatch({
     if (!is.null(priors_df)) glmmTMB(mu_fml, dispformula = disp_fml, family = nbinom2(), data = df, priors = priors_df)
