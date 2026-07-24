@@ -42,4 +42,5 @@ SPIKE_PARAMS = {
     "alpha_floor": 1e-2,
     "alpha_cap": 50.0,
     "n_splits": 5,
+    "trend_min_nz": 30,
 }
