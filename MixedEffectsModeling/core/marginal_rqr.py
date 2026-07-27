@@ -53,6 +53,32 @@ def marginal_nb_loglik(y, mu, alpha, tau2, n_nodes=7):
     return m + np.log(np.exp(logpmf_k - m).sum(axis=0))
 
 
+def nb_marginal_mean_var(mu, alpha, tau2):
+    tau2 = np.asarray(tau2, dtype=np.float64)
+    if np.all(tau2 < 1e-6):
+        return mu, mu + alpha * mu ** 2
+    mean = mu * np.exp(tau2 / 2)
+    ey2 = mu * np.exp(tau2 / 2) + (1 + alpha) * mu ** 2 * np.exp(2 * tau2)
+    return mean, ey2 - mean ** 2
+
+
+def nb_marginal_pmf0(mu, alpha, tau2, n_nodes=7):
+    tau2 = np.asarray(tau2, dtype=np.float64)
+    n_ = 1.0 / np.maximum(alpha, 1e-8)
+    if np.all(tau2 < 1e-6):
+        p_ = np.clip(n_ / (n_ + mu), RQR_EPS, 1 - RQR_EPS)
+        return nbinom.pmf(0, n_, p_)
+    nodes, weights = hermegauss(n_nodes)
+    weights = weights / weights.sum()
+    sd = np.sqrt(np.maximum(tau2, 0.0))
+    total = np.zeros_like(mu)
+    for node, w in zip(nodes, weights):
+        mu_b = mu * np.exp(sd * node)
+        p_ = np.clip(n_ / (n_ + mu_b), RQR_EPS, 1 - RQR_EPS)
+        total += w * nbinom.pmf(0, n_, p_)
+    return total
+
+
 def marginal_nb_rqr(y, mu, alpha, tau2, seed, n_nodes=7):
     y = np.asarray(y)
     tau2 = np.asarray(tau2, dtype=np.float64)

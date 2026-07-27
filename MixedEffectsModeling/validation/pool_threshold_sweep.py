@@ -1,5 +1,6 @@
 import argparse
 import json
+import logging
 import pickle
 import subprocess
 import sys
@@ -13,13 +14,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 import MixedEffectsModeling.config as config
 from MixedEffectsModeling.core.calibration import gene_shash_calibration
 from MixedEffectsModeling.core.dispersion_trend import load_trend
-from MixedEffectsModeling.core.marginal_rqr import _poisson_rqr, marginal_nb_rqr
+from MixedEffectsModeling.core.marginal_rqr import (
+    _poisson_rqr, marginal_nb_rqr, nb_marginal_mean_var, nb_marginal_pmf0,
+)
 from MixedEffectsModeling.core.model_engine_mixed import NormativeModelEngineMixed
 from MixedEffectsModeling.validation.cv_engine import cv_model_route
 
 MP = config.SPIKE_PARAMS
 THRESHOLDS = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 SHASH_MAX_N = 3000
+POISSON_ALPHA_EPS = 1e-8  # alpha -> 0 limit of NB reduces to Poisson; reused so PPC math needs no family branch
 
 
 def cv_pool_route(e2, genes_t, folds, tmp):
@@ -49,6 +53,7 @@ def cv_pool_route(e2, genes_t, folds, tmp):
 
         beta = np.asarray(fit["beta"])
         tau2 = float(fit["tau2"]) if fit.get("tau2") is not None else 0.0
+        alpha_eff = fit["alpha"] if fit["family"] == "negbin" else POISSON_ALPHA_EPS
         mean_hc = dict(zip(fit["gene"], fit["mean_hc"]))
         eps = fit["eps"]
         X_te = e2.X_hc_scaled[te]
@@ -62,15 +67,21 @@ def cv_pool_route(e2, genes_t, folds, tmp):
             if fit["family"] == "poisson":
                 z = _poisson_rqr(y_te, mu, seed=42 + fi)
             else:
-                z = marginal_nb_rqr(y_te, mu, fit["alpha"], tau2, seed=42 + fi)
-            rows.append(dict(gene=g, z=z))
+                z = marginal_nb_rqr(y_te, mu, alpha_eff, tau2, seed=42 + fi)
+            rows.append(dict(gene=g, z=z, y=y_te, mu=mu,
+                             alpha=np.full_like(mu, alpha_eff), tau2=np.full_like(mu, tau2)))
 
-    zdict = {}
+    zdict, ppc_dict = {}, {}
     for g in genes_t:
-        parts = [r["z"] for r in rows if r["gene"] == g]
-        if parts:
-            zdict[g] = np.concatenate(parts)
-    return zdict, fold_stats
+        grecs = [r for r in rows if r["gene"] == g]
+        if not grecs:
+            continue
+        zdict[g] = np.concatenate([r["z"] for r in grecs])
+        ppc_dict[g] = dict(
+            y=np.concatenate([r["y"] for r in grecs]), mu=np.concatenate([r["mu"] for r in grecs]),
+            alpha=np.concatenate([r["alpha"] for r in grecs]), tau2=np.concatenate([r["tau2"] for r in grecs]),
+        )
+    return zdict, ppc_dict, fold_stats
 
 
 def naive_calib(z):
@@ -82,6 +93,20 @@ def naive_calib(z):
     calib = gene_shash_calibration(v)
     return dict(naive_exceed=calib["naive_exceed"], naive_fdr_reject_rate=calib["naive_fdr_reject_rate"],
                raw_skew=calib["raw_skew"], raw_kurtosis=calib["raw_kurtosis"])
+
+
+EMPTY_PPC = dict(y=np.array([]), mu=np.array([]), alpha=np.array([]), tau2=np.array([]))
+
+def ppc_metrics(ppc):
+    y, mu, alpha, tau2 = ppc["y"], ppc["mu"], ppc["alpha"], ppc["tau2"]
+    if len(y) < 8:
+        return dict(obs_zero_frac=np.nan, pred_zero_frac=np.nan, zero_diff=np.nan, pearson_chi2=np.nan)
+    obs_zero_frac = float(np.mean(y == 0))
+    pred_zero_frac = float(np.mean(nb_marginal_pmf0(mu, alpha, tau2)))
+    mu_marg, var_marg = nb_marginal_mean_var(mu, alpha, tau2)
+    pearson_chi2 = float(np.mean((y - mu_marg) ** 2 / np.maximum(var_marg, 1e-8)))
+    return dict(obs_zero_frac=obs_zero_frac, pred_zero_frac=pred_zero_frac,
+               zero_diff=pred_zero_frac - obs_zero_frac, pearson_chi2=pearson_chi2)
 
 
 def main():
@@ -96,12 +121,20 @@ def main():
     out_dir = config.THRESHOLD_SWEEP_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    for h in list(logging.getLogger().handlers):
+        logging.getLogger().removeHandler(h)
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(message)s",
+        handlers=[logging.FileHandler(out_dir / "sweep.log"), logging.StreamHandler()],
+    )
+    log = logging.getLogger(__name__)
+
     summary = pd.read_csv(config.ENGINE_MIXED_DIR / "training_summary.csv", index_col="gene")
     summary = summary[summary["ok"]]
     superset = summary.index[summary["nz"] < max(thresholds)].tolist()[:args.limit_genes]
     nz_of = summary["nz"].to_dict()
     stage_of = summary["stage"].to_dict()
-    print(f"superset (nz < {max(thresholds)}): {len(superset)} genes")
+    log.info(f"superset (nz < {max(thresholds)}): {len(superset)} genes")
 
     e2 = NormativeModelEngineMixed()
     e2.load_hc_data()
@@ -111,22 +144,20 @@ def main():
 
     tmp = "/tmp/pool_threshold_sweep"
     Path(tmp).mkdir(exist_ok=True)
-
-    # individual (nbi-fixed-stage) CV is run exactly once, on the full nz<max(thresholds)
     ind_cache_path = out_dir / "individual_cv_cache.pkl"
-    zdict_ind, ind_fold_info = {}, {}
+    zdict_ind, ppc_dict_ind, ind_fold_info = {}, {}, {}
     if ind_cache_path.exists():
         with open(ind_cache_path, "rb") as f:
-            cached_superset, zdict_ind, ind_fold_info = pickle.load(f)
+            cached_superset, zdict_ind, ppc_dict_ind, ind_fold_info = pickle.load(f)
         if set(superset) <= set(cached_superset):
-            print(f"individual (model-route) CV baseline: loaded cache -> {ind_cache_path}")
+            log.info(f"individual (model-route) CV baseline: loaded cache -> {ind_cache_path}")
         else:
-            print("individual (model-route) CV cache stale for current superset -- recomputing")
-            zdict_ind, ind_fold_info = {}, {}
+            log.info("individual (model-route) CV cache stale for current superset -- recomputing")
+            zdict_ind, ppc_dict_ind, ind_fold_info = {}, {}, {}
 
     if not (set(superset) <= set(ind_fold_info)):
-        print(f"individual (model-route) CV baseline on {len(superset)} genes...")
-        zdict_ind, _, ind_fold_stat_rows = cv_model_route(e2, superset, stage_of, folds, tmp)
+        log.info(f"individual (model-route) CV baseline on {len(superset)} genes...")
+        zdict_ind, ppc_dict_ind, ind_fold_stat_rows = cv_model_route(e2, superset, stage_of, folds, tmp)
         ind_fold_info = {g: dict(n_folds_ok=0, fail_reasons=[]) for g in superset}
         for r in ind_fold_stat_rows:
             info = ind_fold_info[r["gene"]]
@@ -135,7 +166,7 @@ def main():
             else:
                 info["fail_reasons"].append(f"fold{r['fold']}:{r['fail_reason'] or 'unknown'}")
         with open(ind_cache_path, "wb") as f:
-            pickle.dump((superset, zdict_ind, ind_fold_info), f)
+            pickle.dump((superset, zdict_ind, ppc_dict_ind, ind_fold_info), f)
 
     # pooled CV is threshold-specific and cached per threshold, so re-running the sweep
     # (e.g. after adding a new threshold) only computes the missing ones.
@@ -143,15 +174,15 @@ def main():
     for t in thresholds:
         t_path = out_dir / f"pool_vs_individual_naive_z_t{t}.csv"
         if t_path.exists():
-            print(f"threshold={t}: cached -> {t_path}")
+            log.info(f"threshold={t}: cached -> {t_path}")
             per_t_dfs.append(pd.read_csv(t_path))
             continue
 
         genes_t = [g for g in superset if nz_of[g] < t]
         if not genes_t:
             continue
-        print(f"threshold={t}: pooled CV on {len(genes_t)} genes...")
-        zdict_pool, pool_fold_stats = cv_pool_route(e2, genes_t, folds, tmp)
+        log.info(f"threshold={t}: pooled CV on {len(genes_t)} genes...")
+        zdict_pool, ppc_dict_pool, pool_fold_stats = cv_pool_route(e2, genes_t, folds, tmp)
         pool_n_folds_ok = sum(1 for r in pool_fold_stats if r["ok"])
         pool_fail_reasons = ";".join(f"fold{r['fold']}:{r['fail_reason']}" for r in pool_fold_stats if not r["ok"])
 
@@ -159,22 +190,26 @@ def main():
         for g in genes_t:
             m_ind = naive_calib(zdict_ind.get(g, np.array([])))
             m_pool = naive_calib(zdict_pool.get(g, np.array([])))
+            ppc_ind = ppc_metrics(ppc_dict_ind.get(g, EMPTY_PPC))
+            ppc_pool = ppc_metrics(ppc_dict_pool.get(g, EMPTY_PPC))
             t_rows.append(dict(
                 threshold=t, gene=g, nz=nz_of[g], ind_stage=stage_of[g],
                 ind_n_folds_ok=ind_fold_info[g]["n_folds_ok"],
                 ind_fail_reasons=";".join(ind_fold_info[g]["fail_reasons"]),
                 **{f"ind_{k}": v for k, v in m_ind.items()},
+                **{f"ind_{k}": v for k, v in ppc_ind.items()},
                 pool_n_folds_ok=pool_n_folds_ok, pool_fail_reasons=pool_fail_reasons,
                 **{f"pool_{k}": v for k, v in m_pool.items()},
+                **{f"pool_{k}": v for k, v in ppc_pool.items()},
             ))
         t_df = pd.DataFrame(t_rows)
         t_df.to_csv(t_path, index=False)
-        print(f"Saved -> {t_path} ({len(t_df)} rows)")
+        log.info(f"Saved -> {t_path} ({len(t_df)} rows)")
         per_t_dfs.append(t_df)
 
     df = pd.concat(per_t_dfs, ignore_index=True)
     df.to_csv(out_dir / "pool_vs_individual_naive_z.csv", index=False)
-    print(f"Saved combined -> {out_dir}/pool_vs_individual_naive_z.csv ({len(df)} rows)")
+    log.info(f"Saved combined -> {out_dir}/pool_vs_individual_naive_z.csv ({len(df)} rows)")
 
 
 if __name__ == "__main__":
