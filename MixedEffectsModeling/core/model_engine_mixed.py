@@ -51,6 +51,16 @@ class GeneRecordMixed:
     cv_shash_exceed: float = None
     cv_naive_fdr_reject_rate: float = None
     cv_corr_fdr_reject_rate: float = None
+    cv_obs_zero_frac: float = None
+    cv_pred_zero_frac: float = None
+    cv_zero_diff: float = None
+    cv_pearson_chi2: float = None
+    cv_obs_mean: float = None
+    cv_pred_mean: float = None
+    cv_mean_rel_err: float = None
+    cv_obs_var: float = None
+    cv_pred_var: float = None
+    cv_var_rel_err: float = None
 
 
 class NormativeModelEngineMixed:
@@ -84,11 +94,11 @@ class NormativeModelEngineMixed:
         pc_indices = np.where(is_pc)[0]
         self._gene_col = {g: pc_indices[i] for i, g in enumerate(self.pc_gene_names)}
 
-    def build_dispersion_trend(self):
+    def build_dispersion_trend(self, path=None):
         Y_pc = self.Y_hc[:, list(self._gene_col.values())]
         trend = build_trend(Y_pc, min_nz=MP["trend_min_nz"])
-        save_trend(trend)
-        self.alpha_fn = load_trend()
+        save_trend(trend, path)
+        self.alpha_fn = load_trend(path)
 
     def assign_routes(self):
         # nz_a_max is deferred -- default to 0 (no gene routed to "pool", every
