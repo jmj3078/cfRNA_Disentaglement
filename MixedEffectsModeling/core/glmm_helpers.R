@@ -35,39 +35,79 @@ disp_se <- function(fit, ncoef) {
   ifelse(is.finite(s), s, NA_real_)
 }
 
-# One-step Pregibon (1981) Cook's distance for the NB2 log-link fit. The
-# estimated random intercept is absorbed into mu and the hat matrix uses the
-# fixed-effect design only (standard approximation). Cutoff qf(0.99, p, n-p) and
-# the 5% cap follow DESeq2's outlier rule; observations are dropped rather than
-# replaced by a trimmed mean, which would fabricate counts and bias dispersion
-# downward. Returns indices ordered by decreasing influence.
+# PCIS -- Prior-Conditioned Impact Score. Cook-shaped but deliberately NOT Cook's
+# distance, and named apart from it so the difference cannot be lost. Both of its
+# departures are prior-conditioned: the variance is conditioned on the lowess
+# trend prior, and the leverage on the prior-penalised mixed design.
 #
-# The variance uses the lowess TREND dispersion, not the gene's own fitted one.
-# With a freely estimated dispersion an outlier masks itself: measured on
-# synthetic near-Poisson data, three 20x outliers inflated alpha 0.004 -> 0.147
-# (36x), which shrank their Pearson residuals enough that Cook's D fell from
-# 4.5-9.4 to 0.6-1.1 -- below the 2.29 cutoff, so nothing was ever flagged at any
-# outlier magnitude. The trend value is the same reference the EB intercept
-# squeeze shrinks toward, so it is the pipeline's own definition of "typical
-# dispersion at this expression level".
-cook_outliers <- function(fit, Xa, y, trend_alpha, f_q, max_frac) {
+#   w_i   = mu_i / (1 + alpha_trend * mu_i)          NB2 log-link IRLS weight
+#   M     = [Xf Z],  P = blkdiag(0_p, I/tau^2)       fixed design + batch design
+#   H     = W^1/2 M (M'WM + P)^-1 M' W^1/2
+#   p_eff = tr(H)
+#   PCIS_i= r_i^2 / p_eff * h_ii / (1 - h_ii)^2,  r_i = (y_i-mu_i)/sqrt(mu_i+alpha_trend*mu_i^2)
+#
+# Two deliberate departures from Cook's distance, both measured:
+#
+# 1. The variance uses the lowess TREND dispersion, not the gene's own fitted
+#    one. With a freely estimated dispersion an outlier masks itself: three 20x
+#    outliers on a synthetic near-Poisson gene inflated alpha 0.004 -> 0.147
+#    (36x), dropping their statistic from 4.5-9.4 to 0.6-1.1 -- below threshold,
+#    so nothing was flagged at ANY outlier magnitude. This is what breaks the
+#    one-step deletion approximation, so PCIS is an influence heuristic, not an
+#    estimate of the parameter shift under deletion.
+# 2. The leverage includes the batch design Z under a ridge penalty 1/tau^2
+#    (Hodges & Sargent effective df), because mu already contains the BLUP: a
+#    fixed-effect-only hat matrix mixes two different models inside one
+#    statistic. Measured effect: p_eff 18.4 vs p 11 (40% of the model's effective
+#    complexity was being ignored) and singleton-batch leverage 0.017 -> 0.165
+#    (10x). tau2 -> 0 sends the penalty to infinity, so p_eff -> p automatically.
+#
+# Consequently qf(f_q, p_eff, n - p_eff) is an inherited DESeq2 threshold
+# CONVENTION, not a distributional result -- PCIS has no F reference distribution.
+# It is calibrated only in the sense that clean simulated data produced zero
+# flags. Observations are dropped rather than replaced by a trimmed mean, which
+# would fabricate counts and bias dispersion downward. Returns indices ordered by
+# decreasing influence.
+#
+# Known blind spot: contamination is absorbed by the dispersion SLOPES, not the
+# intercept (measured: at 100x contamination the disp intercept moved -0.06 while
+# slope estimates and alpha_i at the outlier positions moved far more), so PCIS is
+# insensitive for high-alpha low-expression genes -- 1 of 3 detected at 100x,
+# against 3 of 3 at 20x for a low-alpha high-expression gene.
+pcis_outliers <- function(fit, Xa, y, batch, trend_alpha, f_q, max_frac) {
   p <- ncol(Xa); n <- length(y)
   if (n - p < 4) return(integer(0))
   mu <- tryCatch(as.numeric(predict(fit, type = "response")), error = function(e) NULL)
   if (is.null(mu) || !all(is.finite(mu)) || !is.finite(trend_alpha) || trend_alpha <= 0) return(integer(0))
   alpha <- trend_alpha
-  V <- mu + alpha * mu^2
-  r <- (y - mu) / sqrt(V)
-  Xw <- Xa * sqrt(mu / (1 + alpha * mu))
-  XtX <- tryCatch(solve(crossprod(Xw)), error = function(e) NULL)
-  if (is.null(XtX)) return(integer(0))
-  h <- pmin(pmax(rowSums((Xw %*% XtX) * Xw), 0), 1 - 1e-8)
-  D <- r^2 * h / (p * (1 - h)^2)
-  over <- which(is.finite(D) & D > qf(f_q, p, n - p))
+  r <- (y - mu) / sqrt(mu + alpha * mu^2)
+  sw <- sqrt(mu / (1 + alpha * mu))
+
+  tau2 <- tryCatch(as.numeric(VarCorr(fit)$cond[[1]][1, 1]), error = function(e) NA_real_)
+  Z <- tryCatch(model.matrix(~ 0 + factor(batch)), error = function(e) NULL)
+  h <- NULL
+  if (!is.null(Z) && isTRUE(is.finite(tau2))) {
+    Mw <- cbind(Xa, Z) * sw
+    P <- diag(c(rep(0, p), rep(1 / max(tau2, 1e-6), ncol(Z))))
+    A <- tryCatch(solve(crossprod(Mw) + P), error = function(e) NULL)
+    if (!is.null(A)) h <- rowSums((Mw %*% A) * Mw)
+  }
+  if (is.null(h)) {                       # fall back to the fixed-effect design
+    Xw <- Xa * sw
+    A <- tryCatch(solve(crossprod(Xw)), error = function(e) NULL)
+    if (is.null(A)) return(integer(0))
+    h <- rowSums((Xw %*% A) * Xw)
+  }
+  h <- pmin(pmax(h, 0), 1 - 1e-8)
+  p_eff <- sum(h)
+  if (!is.finite(p_eff) || p_eff < 1 || n - p_eff < 4) return(integer(0))
+
+  PCIS <- r^2 * h / (p_eff * (1 - h)^2)
+  over <- which(is.finite(PCIS) & PCIS > qf(f_q, p_eff, n - p_eff))
   if (length(over) == 0) return(integer(0))
   n_keep <- min(length(over), floor(max_frac * n))
   if (n_keep < 1) return(integer(0))
-  over[order(-D[over])][seq_len(n_keep)]
+  over[order(-PCIS[over])][seq_len(n_keep)]
 }
 
 # Fits ONE stage for ONE gene. Caller (glmm_fit.R) drives the demotion order.
@@ -80,7 +120,7 @@ cook_outliers <- function(fit, Xa, y, trend_alpha, f_q, max_frac) {
 # prior sd for the dispersion SLOPES, estimated by a --mode pilot run.
 fit_stage_gene <- function(y, safe_names, X, batch, stage, tau_slope, trend_alpha,
                            beta_explode_thr, tau2_max, disp_intercept_max,
-                           cook_f_q, max_outlier_frac) {
+                           pcis_f_q, max_outlier_frac) {
   df <- as.data.frame(X); colnames(df) <- safe_names
   df$y__ <- as.integer(round(y))
   df$batch__ <- factor(batch)
@@ -111,11 +151,14 @@ fit_stage_gene <- function(y, safe_names, X, batch, stage, tau_slope, trend_alph
 
   conv <- is_converged(fit, beta_explode_thr, tau2_max, disp_intercept_max)
   n_out <- 0L; refit_failed <- FALSE
-  # Cook's distance is computed even when the first fit failed the convergence
-  # gate -- outliers can be the cause of the failure, so the refit gets a chance.
-  drop_idx <- cook_outliers(fit, cbind(1, as.matrix(X)), df$y__, trend_alpha, cook_f_q, max_outlier_frac)
+  # PCIS is computed even when the first fit failed the convergence gate --
+  # outliers can be the cause of the failure, so the refit gets a chance.
+  drop_idx <- pcis_outliers(fit, cbind(1, as.matrix(X)), df$y__, batch,
+                            trend_alpha, pcis_f_q, max_outlier_frac)
   if (length(drop_idx) > 0) {
-    fit2 <- run(df[-drop_idx, , drop = FALSE])
+    # droplevels: HC has 5 singleton batches, so removing one observation can
+    # empty a random-effect level entirely.
+    fit2 <- run(droplevels(df[-drop_idx, , drop = FALSE]))
     conv2 <- if (inherits(fit2, "try-error")) list(ok = FALSE) else
       is_converged(fit2, beta_explode_thr, tau2_max, disp_intercept_max)
     if (isTRUE(conv2$ok)) {

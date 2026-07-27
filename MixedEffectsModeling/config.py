@@ -46,13 +46,24 @@ SPIKE_PARAMS = {
     "trend_min_nz": 30,
 }
 
-# Empirical-Bayes dispersion shrinkage + Cook's distance outlier removal
-# (docs/superpowers/specs/2026-07-27-eb-dispersion-cook-outlier-design.md).
+# Empirical-Bayes dispersion shrinkage + PCIS (Prior-Conditioned Impact Score)
+# outlier removal
 EB_PARAMS = {
     "pilot_n_genes": 2000,
     "pilot_n_strata": 10,
     "tau_floor": 1e-3,
-    "cook_f_q": 0.99,
-    "max_outlier_frac": 0.05,
+}
+
+# Everything glmm_fit.R needs. Serialised to json and passed as --fit-params, so
+# these constants live here rather than being duplicated as R literals. The R
+# side keeps identical fallback defaults, which is what makes --fit-params safe
+# to add to an already-running pipeline.
+FIT_PARAMS = {
+    "beta_explode_thr": SPIKE_PARAMS["beta_explode_thr"],
+    "tau2_max": SPIKE_PARAMS["beta_explode_thr"] ** 2,
     "disp_intercept_max": 10.0,
+    "pcis_f_q": 0.99,
+    "max_outlier_frac": 0.05,
+    "chunk_size": 200,
+    "cores": 12,
 }

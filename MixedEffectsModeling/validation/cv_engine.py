@@ -53,10 +53,13 @@ def cv_model_route(e2, model_genes, stage_of, folds, tmp, disp_prior_path=None):
         pd.DataFrame({"Batch_ID": e2.batch[tr]}).to_csv(f"{tmp}/batch_{fi}.csv.gz")
         pd.DataFrame({"gene": model_genes, "stage": [stage_of[g] for g in model_genes]}).to_csv(
             f"{tmp}/genes_{fi}.csv", index=False)
+        fit_params = Path(tmp) / "fit_params.json"
+        fit_params.write_text(json.dumps(config.FIT_PARAMS))
         cmd = [
             "Rscript", str(config.GLMM_FIT_R), "--x", f"{tmp}/X_{fi}.csv.gz", "--y", f"{tmp}/Y_{fi}.csv.gz",
             "--batch", f"{tmp}/batch_{fi}.csv.gz", "--genes", f"{tmp}/genes_{fi}.csv",
-            "--trend", str(config.DISPERSION_TREND_PATH), "--mode", "fixed_stage", "--out", f"{tmp}/res_{fi}.csv",
+            "--trend", str(config.DISPERSION_TREND_PATH), "--fit-params", str(fit_params),
+            "--mode", "fixed_stage", "--out", f"{tmp}/res_{fi}.csv",
         ]
         if disp_prior_path is not None:
             cmd += ["--disp-prior", str(disp_prior_path)]

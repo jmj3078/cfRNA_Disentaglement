@@ -133,7 +133,7 @@ no-ops on a non-finite alpha). Its fits are hyperparameters only, never deployed
 `Figures/dispersion_trend.png` + `trend_residuals.csv`, so a trend is never
 deployed without its calibration record.
 
-### 3. Cook's distance outlier removal
+### 3. PCIS outlier removal (was: Cook's distance)
 
 One-step Pregibon (1981) Cook's distance on the fitted NB2 log-link model, with
 the estimated random intercept absorbed into `mu` (standard approximation --
@@ -188,7 +188,7 @@ per-fold re-estimation would double the pilot cost for no measurable change.
 | `core/eb_shrinkage.py` | new: `estimate_slope_prior`, `squeeze_log_theta` |
 | `core/dispersion_trend.py` | new `build_trend_from_fits`; `build_trend` demoted to diagnostic |
 | `core/trend_report.py` | new: always-on trend/prior calibration figure + residual CSV |
-| `core/glmm_helpers.R` | 2 stages, `disp_se`, `cook_outliers`, outlier refit in `fit_stage_gene` |
+| `core/glmm_helpers.R` | 2 stages, `disp_se`, `pcis_outliers` (mixed-model leverage), outlier refit in `fit_stage_gene` |
 | `core/glmm_fit.R` | `--mode pilot`, `--disp-prior`, 2-stage cascade, `disp_se_*`/`n_outliers` columns |
 | `core/model_engine_mixed.py` | `run_pilot`, squeeze in `train`, record fields, summary columns |
 | `core/run_engine.py` | pilot cache step |

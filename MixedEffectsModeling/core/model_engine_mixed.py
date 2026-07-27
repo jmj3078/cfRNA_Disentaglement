@@ -132,10 +132,12 @@ class NormativeModelEngineMixed:
         pd.DataFrame({"gene": genes}).to_csv(f"{tmp_dir}/genes_{tag}.csv", index=False)
 
     def _run_glmm_fit(self, tmp_dir, tag, mode, out_csv, disp_prior_path=None):
+        fit_params = Path(tmp_dir) / "fit_params.json"
+        fit_params.write_text(json.dumps(config.FIT_PARAMS))
         cmd = ["Rscript", str(config.GLMM_FIT_R), "--x", f"{tmp_dir}/X.csv.gz",
                "--y", f"{tmp_dir}/Y_{tag}.csv.gz", "--batch", f"{tmp_dir}/batch.csv.gz",
                "--genes", f"{tmp_dir}/genes_{tag}.csv", "--trend", str(self.trend_path),
-               "--mode", mode, "--out", out_csv]
+               "--mode", mode, "--fit-params", str(fit_params), "--out", out_csv]
         if disp_prior_path is not None:
             cmd += ["--disp-prior", str(disp_prior_path)]
         subprocess.run(cmd, check=True, cwd=str(config.GLMM_FIT_R.parent))

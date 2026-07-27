@@ -11,6 +11,7 @@ opt <- parse_args(OptionParser(option_list = list(
   make_option("--batch", type = "character"), make_option("--genes", type = "character"),
   make_option("--trend", type = "character"), make_option("--mode", type = "character", default = "cascade"),
   make_option("--disp-prior", type = "character", default = ""),
+  make_option("--fit-params", type = "character", default = ""),
   make_option("--out", type = "character"), make_option("--chunk-size", type = "integer", default = 200),
   make_option("--cores", type = "integer", default = min(parallel::detectCores() - 1, 12))
 )))
@@ -20,7 +21,7 @@ Y <- read.csv(opt$y, row.names = 1)
 batch <- read.csv(opt$batch, row.names = 1)[[1]]
 gene_meta <- read.csv(opt$genes)  # columns: gene, [stage] (stage only needed for fixed_stage mode)
 # The trend is itself estimated FROM a pilot run, so pilot mode has none yet:
-# alpha_of returns NA there, trend_alpha is reported as NA and cook_outliers
+# alpha_of returns NA there, trend_alpha is reported as NA and pcis_outliers
 # no-ops (a pilot exists only to supply hyperparameters, not deployed fits).
 alpha_of <- function(mean_y) NA_real_
 if (opt$mode != "pilot" && nzchar(opt$trend) && file.exists(opt$trend)) {
@@ -33,11 +34,21 @@ if (opt$mode != "pilot" && nzchar(opt$trend) && file.exists(opt$trend)) {
 }
 safe_names <- sanitize_names(colnames(X))
 colnames(X) <- safe_names
-BETA_EXPLODE_THR <- 3.0
-TAU2_MAX <- BETA_EXPLODE_THR^2
-DISP_INTERCEPT_MAX <- 10.0
-COOK_F_Q <- 0.99
-MAX_OUTLIER_FRAC <- 0.05
+# Fallback defaults, identical to config.FIT_PARAMS. They exist only so the
+# script still runs standalone without --fit-params; config.py is the source.
+FP <- list(beta_explode_thr = 3.0, tau2_max = 9.0, disp_intercept_max = 10.0,
+           pcis_f_q = 0.99, max_outlier_frac = 0.05)
+if (nzchar(opt$`fit-params`) && file.exists(opt$`fit-params`)) {
+  loaded <- fromJSON(opt$`fit-params`)
+  for (k in names(FP)) if (!is.null(loaded[[k]])) FP[[k]] <- loaded[[k]]
+  if (!is.null(loaded$chunk_size)) opt$`chunk-size` <- as.integer(loaded$chunk_size)
+  if (!is.null(loaded$cores)) opt$cores <- as.integer(loaded$cores)
+}
+BETA_EXPLODE_THR <- FP$beta_explode_thr
+TAU2_MAX <- FP$tau2_max
+DISP_INTERCEPT_MAX <- FP$disp_intercept_max
+PCIS_F_Q <- FP$pcis_f_q
+MAX_OUTLIER_FRAC <- FP$max_outlier_frac
 
 # EB prior sd for the dispersion SLOPES, one value per covariate, estimated by a
 # --mode pilot run (eb_shrinkage.estimate_slope_prior). NULL in pilot mode and
@@ -53,7 +64,7 @@ if (file.exists(opt$out)) done_genes <- read.csv(opt$out)$gene
 
 fit_stage <- function(y, stage, trend_alpha) fit_stage_gene(
   y, safe_names, X, batch, stage, TAU_SLOPE, trend_alpha,
-  BETA_EXPLODE_THR, TAU2_MAX, DISP_INTERCEPT_MAX, COOK_F_Q, MAX_OUTLIER_FRAC)
+  BETA_EXPLODE_THR, TAU2_MAX, DISP_INTERCEPT_MAX, PCIS_F_Q, MAX_OUTLIER_FRAC)
 
 # v3: 2-stage cascade (nbi_full_eb -> nbi_intercept_eb). force-return at nbi_intercept_eb regardless of ok --
 # a gene that fails there is genuinely unmodelable and comes back ok=FALSE

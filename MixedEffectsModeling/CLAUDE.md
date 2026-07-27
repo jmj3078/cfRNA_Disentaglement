@@ -114,32 +114,67 @@ without its calibration record.
 19,220 v2 genes, while 30.0% actually had a collapsed batch variance (32.3% had
 `tau2 > 0.1`; percentiles 0/0/0.034/0.161/0.627/3.836 at 10/25/50/75/90/99).
 
-### 1b. Cook's Distance Outlier Removal (`core/glmm_helpers.R:cook_outliers`)
+### 1b. PCIS Outlier Removal (`core/glmm_helpers.R:pcis_outliers`)
 
-One-step Pregibon (1981) Cook's distance on the fitted NB2 log-link model, with
-the random intercept absorbed into `mu` and the hat matrix built from the
-fixed-effect design only. Samples with `D_i > qf(0.99, p, n-p)` are dropped
-(largest first, at most `floor(0.05*n)`) and the stage is refit once -- DESeq2's
-cutoff rule. Observations are **removed**, not replaced by a trimmed mean, which
-would fabricate counts and bias dispersion downward.
+**PCIS = Prior-Conditioned Impact Score.** Cook-shaped, deliberately NOT Cook's
+distance, and named apart from it so the difference cannot be silently lost:
 
-**The variance uses the lowess TREND dispersion, not the gene's own fitted one.**
-With a freely estimated dispersion an outlier masks itself: three injected 20x
-outliers inflated a near-Poisson gene's alpha 0.004 -> 0.147 (36x), which shrank
-their Pearson residuals enough that `D` fell from 4.5-9.4 to 0.6-1.1, below the
-2.29 cutoff -- nothing was flagged at *any* outlier magnitude. With the trend
-alpha the same three are caught exactly and alpha recovers to 0.0042; a genuinely
-overdispersed gene given a 4x-too-small trend alpha still flags nothing, and a
-clean gene flags nothing.
+```
+w_i    = mu_i / (1 + alpha_trend * mu_i)               NB2 log-link IRLS weight
+M      = [Xf Z],  P = blkdiag(0_p, I/tau^2)            fixed design + batch design
+H      = W^1/2 M (M'WM + P)^-1 M' W^1/2,  p_eff = tr(H)
+r_i    = (y_i - mu_i) / sqrt(mu_i + alpha_trend * mu_i^2)
+PCIS_i = r_i^2 / p_eff * h_ii / (1 - h_ii)^2
+```
 
-If the refit fails to converge the pre-removal fit is kept and
-`outlier_refit_failed=True` is logged. Cook's distance is computed even when the
-first fit failed the convergence gate, since outliers can be the cause.
-Measured on an nz-stratified 300-gene sample: 2.7% of genes drop exactly 1
-sample, concentrated in the mid-nz bins. Sensitivity is conservative -- 5x
-outliers on a near-Poisson gene were not caught.
+Both departures from Cook's distance are prior-conditioned, and both were forced
+by measurement:
 
----
+1. **Variance conditioned on the trend prior, not the gene's own fitted
+   dispersion.** A freely estimated dispersion lets an outlier mask itself: three
+   20x outliers on a synthetic near-Poisson gene inflated alpha 0.004 -> 0.147
+   (36x), dropping the statistic from 4.5-9.4 to 0.6-1.1 and flagging nothing at
+   *any* outlier magnitude. The EB squeeze cannot fix this -- it weights by
+   precision (`SE^2/(SE^2+tau_d^2)`, median w = 0.037 on real fits), and a
+   contaminated dispersion has a *small* SE, so 36x contamination survives the
+   squeeze as 32x. EB shrinkage defends against noise; PCIS defends against
+   contamination.
+2. **Leverage conditioned on the prior-penalised mixed design.** `mu` already
+   contains the BLUP, so a fixed-effect-only hat matrix mixes two different
+   models inside one statistic. Measured: `p_eff` 18.4 vs `p` 11 (40% of the
+   model's effective complexity ignored) and singleton-batch leverage 0.017 ->
+   0.165 (10x). `tau2 -> 0` sends the penalty to infinity, so `p_eff -> p`
+   automatically for the 30% of genes with a collapsed batch variance.
+
+Because the variance is not the fitted model's, the one-step deletion
+approximation does not hold: **`qf(0.99, p_eff, n-p_eff)` is an inherited DESeq2
+threshold convention, not a distributional result.** PCIS has no F reference
+distribution. Its only calibration evidence is that clean simulated data produced
+zero flags. Observations are dropped (largest PCIS first, at most
+`floor(0.05*n)`) and the stage is refit once with `droplevels` -- HC has 5
+singleton batches, so removing one observation can empty a random-effect level.
+Replacement by a trimmed mean was rejected: it fabricates counts and biases
+dispersion downward.
+
+**Measured behaviour.** Real data, 120 nz-stratified genes: 19 genes (15.8%) drop
+observations, 37 observations total, mostly 1 per gene (max 5), 1 refit failure.
+Not depth-confounded -- `corr(n_flag, library depth) = -0.034`, against `+0.619`
+for a raw ">30x gene median" filter, which was rejected for exactly that reason
+(its top-flagged samples were all in the top depth decile). Residual covariate
+associations are mild: Gene Length Bias -0.257, gDNA Contamination +0.213, GC
+Bias -0.212, everything else |r| < 0.13.
+
+**Known blind spot, measured.** Contamination is absorbed by the dispersion
+SLOPES, not the intercept: at 100x contamination on high-leverage samples the
+disp intercept moved only -0.06 while slope estimates moved far more, so alpha_i
+at the outlier positions stayed inflated ~13x. Consequently PCIS is sensitive for
+low-alpha high-expression genes (3 of 3 detected at 20x) and weak for high-alpha
+low-expression genes (1 of 3 even at 100x) -- arguably correct, since a large
+count genuinely is plausible under a high-dispersion model, but it means PCIS is
+a conservative filter for gross contamination in well-expressed genes, not a
+general outlier detector. A proposal to anchor only the dispersion intercept
+while keeping the fitted slopes was tested and **refuted**: 0 of 3 detected,
+worse than the trend scalar.
 
 ### 1c. Per-Gene SHASH Calibration (`core/calibration.py`)
 Unchanged from v2. Normative modeling requires held-out HC Z-scores to be
