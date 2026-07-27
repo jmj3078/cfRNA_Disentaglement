@@ -19,6 +19,7 @@ GLMM_FIT_R     = _HERE / "core" / "glmm_fit.R"
 GLMM_FIT_POOL_R = _HERE / "core" / "glmm_fit_pool.R"
 POOL_SWEEP_R   = _HERE / "pool_threshold_sweep.R"
 DISPERSION_TREND_PATH = ENGINE_MIXED_DIR / "dispersion_trend.json"
+DISP_PRIOR_PATH = ENGINE_MIXED_DIR / "disp_prior.json"
 
 BIAS_COLUMNS = [
     "log(Total Reads)",
@@ -43,4 +44,15 @@ SPIKE_PARAMS = {
     "alpha_cap": 50.0,
     "n_splits": 5,
     "trend_min_nz": 30,
+}
+
+# Empirical-Bayes dispersion shrinkage + Cook's distance outlier removal
+# (docs/superpowers/specs/2026-07-27-eb-dispersion-cook-outlier-design.md).
+EB_PARAMS = {
+    "pilot_n_genes": 2000,
+    "pilot_n_strata": 10,
+    "tau_floor": 1e-3,
+    "cook_f_q": 0.99,
+    "max_outlier_frac": 0.05,
+    "disp_intercept_max": 10.0,
 }

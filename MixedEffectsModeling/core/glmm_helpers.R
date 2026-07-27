@@ -23,37 +23,113 @@ is_converged <- function(fit, beta_explode_thr, tau2_max, disp_intercept_max) {
   return(list(ok = FALSE, singular = NA, tau2 = tau2))
 }
 
+# Standard errors of the dispersion fixed effects. NA when sdreport is unusable
+# -- the downstream EB squeeze reads NA as SE^2=inf and returns exactly the
+# lowess trend value, recovering v2's hard-fixed dispersion as a limiting case.
+disp_se <- function(fit, ncoef) {
+  V <- tryCatch(vcov(fit, full = TRUE), error = function(e) NULL, warning = function(w) NULL)
+  if (is.null(V)) return(rep(NA_real_, ncoef))
+  idx <- grep("^disp", names(rownames(V)))
+  if (length(idx) != ncoef) return(rep(NA_real_, ncoef))
+  s <- suppressWarnings(sqrt(diag(V))[idx])
+  ifelse(is.finite(s), s, NA_real_)
+}
+
+# One-step Pregibon (1981) Cook's distance for the NB2 log-link fit. The
+# estimated random intercept is absorbed into mu and the hat matrix uses the
+# fixed-effect design only (standard approximation). Cutoff qf(0.99, p, n-p) and
+# the 5% cap follow DESeq2's outlier rule; observations are dropped rather than
+# replaced by a trimmed mean, which would fabricate counts and bias dispersion
+# downward. Returns indices ordered by decreasing influence.
+#
+# The variance uses the lowess TREND dispersion, not the gene's own fitted one.
+# With a freely estimated dispersion an outlier masks itself: measured on
+# synthetic near-Poisson data, three 20x outliers inflated alpha 0.004 -> 0.147
+# (36x), which shrank their Pearson residuals enough that Cook's D fell from
+# 4.5-9.4 to 0.6-1.1 -- below the 2.29 cutoff, so nothing was ever flagged at any
+# outlier magnitude. The trend value is the same reference the EB intercept
+# squeeze shrinks toward, so it is the pipeline's own definition of "typical
+# dispersion at this expression level".
+cook_outliers <- function(fit, Xa, y, trend_alpha, f_q, max_frac) {
+  p <- ncol(Xa); n <- length(y)
+  if (n - p < 4) return(integer(0))
+  mu <- tryCatch(as.numeric(predict(fit, type = "response")), error = function(e) NULL)
+  if (is.null(mu) || !all(is.finite(mu)) || !is.finite(trend_alpha) || trend_alpha <= 0) return(integer(0))
+  alpha <- trend_alpha
+  V <- mu + alpha * mu^2
+  r <- (y - mu) / sqrt(V)
+  Xw <- Xa * sqrt(mu / (1 + alpha * mu))
+  XtX <- tryCatch(solve(crossprod(Xw)), error = function(e) NULL)
+  if (is.null(XtX)) return(integer(0))
+  h <- pmin(pmax(rowSums((Xw %*% XtX) * Xw), 0), 1 - 1e-8)
+  D <- r^2 * h / (p * (1 - h)^2)
+  over <- which(is.finite(D) & D > qf(f_q, p, n - p))
+  if (length(over) == 0) return(integer(0))
+  n_keep <- min(length(over), floor(max_frac * n))
+  if (n_keep < 1) return(integer(0))
+  over[order(-D[over])][seq_len(n_keep)]
+}
+
 # Fits ONE stage for ONE gene. Caller (glmm_fit.R) drives the demotion order.
-# stage must be one of "nbi" / "nbi_disp_intercept" / "nb_fixed" -- the
-# "intercept" fallback stage was removed (v2: a gene that fails nb_fixed is
-# excluded outright rather than trivially "converging" on a 1-df model).
-fit_stage_gene <- function(y, safe_names, X, batch, stage, fixed_log_theta,
-                           priors_df, beta_explode_thr, tau2_max, disp_intercept_max) {
+# v3: stages are "nbi_full_eb" (dispersion regressed on covariates) and "nbi_intercept_eb"
+# (dispersion intercept only). "nbi_disp_intercept" is gone -- with a
+# properly-scaled slope prior it was no longer a distinct model, and "nbi_intercept_eb"
+# now occupies its structural position. The dispersion INTERCEPT is left
+# unpenalized here; it is squeezed toward the lowess trend analytically
+# downstream (eb_shrinkage.squeeze_log_theta). tau_slope is the per-covariate EB
+# prior sd for the dispersion SLOPES, estimated by a --mode pilot run.
+fit_stage_gene <- function(y, safe_names, X, batch, stage, tau_slope, trend_alpha,
+                           beta_explode_thr, tau2_max, disp_intercept_max,
+                           cook_f_q, max_outlier_frac) {
   df <- as.data.frame(X); colnames(df) <- safe_names
   df$y__ <- as.integer(round(y))
   df$batch__ <- factor(batch)
-  if (!is.null(fixed_log_theta)) df$fixed_log_theta <- fixed_log_theta
 
   mu_fml <- as.formula(paste("y__ ~", paste(safe_names, collapse = " + "), "+ (1 | batch__)"))
   disp_fml <- switch(stage,
-    nbi = as.formula(paste("~", paste(safe_names, collapse = " + "))),
-    nbi_disp_intercept = as.formula("~ 1"),
-    nb_fixed = as.formula("~ 0 + offset(fixed_log_theta)"),
+    nbi_full_eb = as.formula(paste("~", paste(safe_names, collapse = " + "))),
+    nbi_intercept_eb = as.formula("~ 1"),
     stop(sprintf("fit_stage_gene: unknown stage '%s'", stage)))
+  n_disp <- if (stage == "nbi_full_eb") length(safe_names) + 1L else 1L
 
-  fit <- tryCatch({
-    if (!is.null(priors_df)) glmmTMB(mu_fml, dispformula = disp_fml, family = nbinom2(), data = df, priors = priors_df)
-    else glmmTMB(mu_fml, dispformula = disp_fml, family = nbinom2(), data = df)
+  pr <- NULL
+  if (stage == "nbi_full_eb" && !is.null(tau_slope)) {
+    pr <- data.frame(prior = sprintf("normal(0, %.6g)", tau_slope),
+                     class = "betad", coef = safe_names)
+  }
+  run <- function(d) tryCatch({
+    if (is.null(pr)) glmmTMB(mu_fml, dispformula = disp_fml, family = nbinom2(), data = d)
+    else glmmTMB(mu_fml, dispformula = disp_fml, family = nbinom2(), data = d, priors = pr)
   }, error = function(e) structure(conditionMessage(e), class = "try-error"))
 
+  fit <- run(df)
   if (inherits(fit, "try-error")) {
-    return(list(stage = stage, ok = FALSE, singular = NA, tau2 = NA,
-               mu_coef = numeric(0), disp_coef = numeric(0), fail_reason = as.character(fit)))
+    return(list(stage = stage, ok = FALSE, singular = NA, tau2 = NA, n_outliers = 0L,
+               outlier_refit_failed = FALSE, mu_coef = numeric(0), disp_coef = numeric(0),
+               disp_se = rep(NA_real_, n_disp), fail_reason = as.character(fit)))
   }
+
   conv <- is_converged(fit, beta_explode_thr, tau2_max, disp_intercept_max)
+  n_out <- 0L; refit_failed <- FALSE
+  # Cook's distance is computed even when the first fit failed the convergence
+  # gate -- outliers can be the cause of the failure, so the refit gets a chance.
+  drop_idx <- cook_outliers(fit, cbind(1, as.matrix(X)), df$y__, trend_alpha, cook_f_q, max_outlier_frac)
+  if (length(drop_idx) > 0) {
+    fit2 <- run(df[-drop_idx, , drop = FALSE])
+    conv2 <- if (inherits(fit2, "try-error")) list(ok = FALSE) else
+      is_converged(fit2, beta_explode_thr, tau2_max, disp_intercept_max)
+    if (isTRUE(conv2$ok)) {
+      fit <- fit2; conv <- conv2; n_out <- length(drop_idx)
+    } else {
+      refit_failed <- TRUE
+    }
+  }
+
   list(stage = stage, ok = conv$ok, singular = conv$singular, tau2 = conv$tau2,
+      n_outliers = n_out, outlier_refit_failed = refit_failed,
       mu_coef = as.numeric(fixef(fit)$cond), disp_coef = as.numeric(fixef(fit)$disp),
-      fail_reason = if (conv$ok) "" else "not_converged_or_explosion_or_tau2_bound")
+      disp_se = disp_se(fit, n_disp),
+      fail_reason = if (isTRUE(conv$ok)) "" else "not_converged_or_explosion_or_tau2_bound")
 }
 
 # Shared-beta pooled GLM (route "pool") + batch random intercept. Unused this

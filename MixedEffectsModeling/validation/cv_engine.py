@@ -13,8 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 import MixedEffectsModeling.config as config
 from MixedEffectsModeling.core.calibration import gene_shash_calibration
 from MixedEffectsModeling.core.dispersion_trend import load_trend
+from MixedEffectsModeling.core.eb_shrinkage import squeeze_log_theta
 from MixedEffectsModeling.core.marginal_rqr import (
-    _poisson_rqr, marginal_nb_rqr, nb_marginal_mean_var, nb_marginal_pmf0,
+    _poisson_rqr, marginal_nb_loglik, marginal_nb_rqr, nb_marginal_mean_var, nb_marginal_pmf0,
 )
 from MixedEffectsModeling.core.model_engine_mixed import NormativeModelEngineMixed
 
@@ -26,7 +27,22 @@ POISSON_ALPHA_EPS = 1e-8  # alpha -> 0 limit of NB reduces to Poisson; reused so
 # Every (gene, fold) pair is recorded here regardless of convergence -- the
 # v1 CV script silently dropped non-converging folds, which hid exactly the
 # fold-level failure information this module exists to keep.
-def cv_model_route(e2, model_genes, stage_of, folds, tmp):
+def squeeze_fold(fits):
+    """Apply the same EB dispersion-intercept squeeze the deployed engine applies,
+    re-estimating tau_d from this fold's own fits so held-out Z-scores reflect the
+    deployed model rather than the unshrunk MLEs."""
+    ok = fits["ok"].astype(bool) & fits["trend_alpha"].notna() & fits["disp_coef_0"].notna()
+    if not ok.any():
+        return fits
+    sub = fits[ok]
+    post, _ = squeeze_log_theta(sub["disp_coef_0"].to_numpy(dtype=float),
+                               sub["disp_se_0"].to_numpy(dtype=float),
+                               -np.log(sub["trend_alpha"].to_numpy(dtype=float)))
+    fits.loc[ok, "disp_coef_0"] = post
+    return fits
+
+
+def cv_model_route(e2, model_genes, stage_of, folds, tmp, disp_prior_path=None):
     if not model_genes:
         return {}, {}, []
     rows, fold_stat_rows = [], []
@@ -37,13 +53,16 @@ def cv_model_route(e2, model_genes, stage_of, folds, tmp):
         pd.DataFrame({"Batch_ID": e2.batch[tr]}).to_csv(f"{tmp}/batch_{fi}.csv.gz")
         pd.DataFrame({"gene": model_genes, "stage": [stage_of[g] for g in model_genes]}).to_csv(
             f"{tmp}/genes_{fi}.csv", index=False)
-        subprocess.run([
+        cmd = [
             "Rscript", str(config.GLMM_FIT_R), "--x", f"{tmp}/X_{fi}.csv.gz", "--y", f"{tmp}/Y_{fi}.csv.gz",
             "--batch", f"{tmp}/batch_{fi}.csv.gz", "--genes", f"{tmp}/genes_{fi}.csv",
             "--trend", str(config.DISPERSION_TREND_PATH), "--mode", "fixed_stage", "--out", f"{tmp}/res_{fi}.csv",
-        ], check=True, cwd=str(config.GLMM_FIT_R.parent))
+        ]
+        if disp_prior_path is not None:
+            cmd += ["--disp-prior", str(disp_prior_path)]
+        subprocess.run(cmd, check=True, cwd=str(config.GLMM_FIT_R.parent))
 
-        fold_fits = pd.read_csv(f"{tmp}/res_{fi}.csv").set_index("gene")
+        fold_fits = squeeze_fold(pd.read_csv(f"{tmp}/res_{fi}.csv").set_index("gene"))
         Xa_te = np.column_stack([np.ones(len(te)), e2.X_hc_scaled[te]])
         for g in model_genes:
             if g not in fold_fits.index:
@@ -56,6 +75,7 @@ def cv_model_route(e2, model_genes, stage_of, folds, tmp):
                                        singular=bool(row["singular"]) if not pd.isna(row["singular"]) else None,
                                        tau2=float(row["tau2"]) if not pd.isna(row["tau2"]) else np.nan,
                                        fail_reason=row["fail_reason"] if not pd.isna(row["fail_reason"]) else "",
+                                       n_outliers=int(row["n_outliers"]) if not pd.isna(row["n_outliers"]) else 0,
                                        n_test=len(te)))
             if not ok:
                 continue
@@ -64,8 +84,8 @@ def cv_model_route(e2, model_genes, stage_of, folds, tmp):
             mu = np.clip(np.exp(Xa_te @ np.nan_to_num(mu_coef, nan=0.0)), 1e-6, 1e8)
             if not np.all(np.isnan(disp_coef)):
                 alpha = np.exp(-Xa_te @ np.nan_to_num(disp_coef, nan=0.0))
-            elif "fixed_alpha" in row.index and not pd.isna(row["fixed_alpha"]):
-                alpha = np.full(len(te), float(row["fixed_alpha"]))
+            elif "trend_alpha" in row.index and not pd.isna(row["trend_alpha"]):
+                alpha = np.full(len(te), float(row["trend_alpha"]))
             else:
                 alpha = np.full(len(te), e2.alpha_fn(float(mu.mean())))
             y_te = e2.Y_hc[te, e2._gene_col[g]]
@@ -151,7 +171,8 @@ def cv_pool_route(e2, genes_t, folds, tmp):
 
 EMPTY_METRICS = dict(obs_zero_frac=np.nan, pred_zero_frac=np.nan, zero_diff=np.nan, pearson_chi2=np.nan,
                     obs_mean=np.nan, pred_mean=np.nan, mean_rel_err=np.nan,
-                    obs_var=np.nan, pred_var=np.nan, var_rel_err=np.nan)
+                    obs_var=np.nan, pred_var=np.nan, var_rel_err=np.nan,
+                    ll_sum=np.nan, ll_mean=np.nan)
 
 
 def ppc_metrics(ppc):
@@ -164,12 +185,14 @@ def ppc_metrics(ppc):
     pearson_chi2 = float(np.mean((y - mu_marg) ** 2 / np.maximum(var_marg, 1e-8)))
     obs_mean, pred_mean = float(y.mean()), float(mu_marg.mean())
     obs_var, pred_var = float(y.var()), float(var_marg.mean())
+    ll = marginal_nb_loglik(y, mu, alpha, tau2)
     return dict(obs_zero_frac=obs_zero_frac, pred_zero_frac=pred_zero_frac,
                zero_diff=pred_zero_frac - obs_zero_frac, pearson_chi2=pearson_chi2,
                obs_mean=obs_mean, pred_mean=pred_mean,
                mean_rel_err=(pred_mean - obs_mean) / max(obs_mean, 1e-8),
                obs_var=obs_var, pred_var=pred_var,
-               var_rel_err=(pred_var - obs_var) / max(obs_var, 1e-8))
+               var_rel_err=(pred_var - obs_var) / max(obs_var, 1e-8),
+               ll_sum=float(np.sum(ll)), ll_mean=float(np.mean(ll)))
 
 
 def main():
@@ -181,6 +204,10 @@ def main():
     ap.add_argument("--out-dir", type=Path, default=config.CV_MIXED_DIR,
                     help="directory to write fold_stats/cv_stats/cv_zscores/cv_ppc into")
     args = ap.parse_args()
+
+    disp_prior_path = args.engine_dir / "disp_prior.json"
+    if not disp_prior_path.exists():
+        disp_prior_path = None
 
     engine_dir = args.engine_dir
     out_dir = args.out_dir
@@ -202,7 +229,7 @@ def main():
     Path(tmp).mkdir(exist_ok=True)
 
     print(f"CV: {len(model_genes)} model-route genes, {len(pool_genes)} pool-route genes")
-    zdict_m, ppc_dict_m, fold_stat_rows = cv_model_route(e2, model_genes, stage_of, folds, tmp)
+    zdict_m, ppc_dict_m, fold_stat_rows = cv_model_route(e2, model_genes, stage_of, folds, tmp, disp_prior_path)
     zdict_p, ppc_dict_p, pool_fold_stats = cv_pool_route(e2, pool_genes, folds, tmp)
     zdict = {**zdict_m, **zdict_p}
     ppc_dict = {**ppc_dict_m, **ppc_dict_p}
@@ -241,6 +268,7 @@ def main():
             cv_zero_diff=ppc["zero_diff"], cv_pearson_chi2=ppc["pearson_chi2"],
             cv_obs_mean=ppc["obs_mean"], cv_pred_mean=ppc["pred_mean"], cv_mean_rel_err=ppc["mean_rel_err"],
             cv_obs_var=ppc["obs_var"], cv_pred_var=ppc["pred_var"], cv_var_rel_err=ppc["var_rel_err"],
+            cv_ll_sum=ppc["ll_sum"], cv_ll_mean=ppc["ll_mean"],
         )
 
         rec = engine.genes.get(g)

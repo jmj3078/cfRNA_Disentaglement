@@ -13,10 +13,17 @@ from sklearn.preprocessing import StandardScaler
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 import MixedEffectsModeling.config as config
-from MixedEffectsModeling.core.dispersion_trend import build_trend, load_trend, save_trend
+from MixedEffectsModeling.core.dispersion_trend import (
+    build_trend, build_trend_from_fits, load_trend, save_trend,
+)
+from MixedEffectsModeling.core.eb_shrinkage import (
+    estimate_slope_prior, load_disp_prior, save_disp_prior, squeeze_log_theta,
+)
 from MixedEffectsModeling.core.marginal_rqr import _poisson_rqr, marginal_nb_rqr
+from MixedEffectsModeling.core.trend_report import trend_report
 
 MP = config.SPIKE_PARAMS
+EB = config.EB_PARAMS
 
 
 @dataclass
@@ -30,12 +37,16 @@ class GeneRecordMixed:
     tau2: float = 0.0
     mu_coef: np.ndarray = None
     disp_coef: np.ndarray = None
+    disp_se: np.ndarray = None
     fail_reason: str = ""
-    nbi_reject_reason: str = ""
-    nbi_disp_intercept_reject_reason: str = ""
-    nb_fixed_reject_reason: str = ""
+    nbi_full_eb_reject_reason: str = ""
+    nbi_intercept_eb_reject_reason: str = ""
+    n_outliers: int = 0
+    outlier_refit_failed: bool = False
     mean_hc: float = None
-    fixed_alpha: float = None
+    trend_alpha: float = None
+    log_theta_raw: float = None
+    log_theta_eb: float = None
     cv_shash_ok: bool = None
     cv_shash_xi: float = None
     cv_shash_eta: float = None
@@ -75,6 +86,10 @@ class NormativeModelEngineMixed:
         self.alpha_fn = None
         self.nz_a_max = None
         self.rare_glm = None
+        self.disp_prior = None
+        self.disp_tau_d2 = None
+        self.trend_report = None
+        self.trend_path = config.DISPERSION_TREND_PATH
 
     def load_hc_data(self, h5ad_path=config.H5AD_PATH):
         adata = sc.read_h5ad(h5ad_path)
@@ -94,12 +109,6 @@ class NormativeModelEngineMixed:
         pc_indices = np.where(is_pc)[0]
         self._gene_col = {g: pc_indices[i] for i, g in enumerate(self.pc_gene_names)}
 
-    def build_dispersion_trend(self, path=None):
-        Y_pc = self.Y_hc[:, list(self._gene_col.values())]
-        trend = build_trend(Y_pc, min_nz=MP["trend_min_nz"])
-        save_trend(trend, path)
-        self.alpha_fn = load_trend(path)
-
     def assign_routes(self):
         # nz_a_max is deferred -- default to 0 (no gene routed to "pool", every
         # gene attempts the model cascade) until a real threshold is chosen and
@@ -112,36 +121,130 @@ class NormativeModelEngineMixed:
             route = "pool" if n < self.nz_a_max else "model"
             self.genes[g] = GeneRecordMixed(name=g, route=route, nz=n)
 
-    def train(self, limit=None, tmp_dir="/tmp/glmm_train"):
-        Path(tmp_dir).mkdir(exist_ok=True)
-        model_genes = [g for g, r in self.genes.items() if r.route == "model"][:limit]
+    def _write_r_inputs(self, tmp_dir):
+        Path(tmp_dir).mkdir(parents=True, exist_ok=True)
         pd.DataFrame(self.X_hc_scaled, columns=config.BIAS_COLUMNS).to_csv(f"{tmp_dir}/X.csv.gz")
-        Y_model = self.Y_hc[:, [self._gene_col[g] for g in model_genes]]
-        pd.DataFrame(Y_model, columns=model_genes).to_csv(f"{tmp_dir}/Y.csv.gz")
         pd.DataFrame({"Batch_ID": self.batch}).to_csv(f"{tmp_dir}/batch.csv.gz")
-        pd.DataFrame({"gene": model_genes}).to_csv(f"{tmp_dir}/genes.csv", index=False)
 
-        subprocess.run([
-            "Rscript", str(config.GLMM_FIT_R), "--x", f"{tmp_dir}/X.csv.gz", "--y", f"{tmp_dir}/Y.csv.gz",
-            "--batch", f"{tmp_dir}/batch.csv.gz", "--genes", f"{tmp_dir}/genes.csv",
-            "--trend", str(config.DISPERSION_TREND_PATH), "--mode", "cascade", "--out", f"{tmp_dir}/results.csv",
-        ], check=True, cwd=str(config.GLMM_FIT_R.parent))
+    def _write_gene_block(self, genes, tmp_dir, tag):
+        Y = self.Y_hc[:, [self._gene_col[g] for g in genes]]
+        pd.DataFrame(Y, columns=genes).to_csv(f"{tmp_dir}/Y_{tag}.csv.gz")
+        pd.DataFrame({"gene": genes}).to_csv(f"{tmp_dir}/genes_{tag}.csv", index=False)
+
+    def _run_glmm_fit(self, tmp_dir, tag, mode, out_csv, disp_prior_path=None):
+        cmd = ["Rscript", str(config.GLMM_FIT_R), "--x", f"{tmp_dir}/X.csv.gz",
+               "--y", f"{tmp_dir}/Y_{tag}.csv.gz", "--batch", f"{tmp_dir}/batch.csv.gz",
+               "--genes", f"{tmp_dir}/genes_{tag}.csv", "--trend", str(self.trend_path),
+               "--mode", mode, "--out", out_csv]
+        if disp_prior_path is not None:
+            cmd += ["--disp-prior", str(disp_prior_path)]
+        subprocess.run(cmd, check=True, cwd=str(config.GLMM_FIT_R.parent))
+
+    def pilot_genes(self, n=None, n_strata=None, seed=42):
+        """Mean-expression-stratified subsample of model-route genes, so the EB
+        prior scale is not dominated by the low-expression bulk."""
+        n = EB["pilot_n_genes"] if n is None else n
+        n_strata = EB["pilot_n_strata"] if n_strata is None else n_strata
+        genes = [g for g, r in self.genes.items() if r.route == "model"]
+        mean_hc = self.Y_hc[:, [self._gene_col[g] for g in genes]].mean(axis=0)
+        rng = np.random.default_rng(seed)
+        per = max(1, n // n_strata)
+        picked = []
+        for chunk in np.array_split(np.argsort(mean_hc), n_strata):
+            k = min(per, len(chunk))
+            picked.extend(chunk[rng.choice(len(chunk), k, replace=False)])
+        return [genes[i] for i in sorted(picked)]
+
+    def prepare_hyperparams(self, trend_path=None, disp_prior_path=None,
+                            tmp_dir="/tmp/glmm_train", n_genes=None):
+        trend_path = Path(trend_path or config.DISPERSION_TREND_PATH)
+        disp_prior_path = Path(disp_prior_path or config.DISP_PRIOR_PATH)
+        pilot_path = trend_path.parent / "pilot_fits.csv"
+        if trend_path.exists() and disp_prior_path.exists():
+            self.trend_path = trend_path
+            self.alpha_fn = load_trend(trend_path)
+            self.disp_prior = load_disp_prior(disp_prior_path)
+            return False
+
+        if pilot_path.exists():
+            pilot = pd.read_csv(pilot_path)
+        else:
+            genes = self.pilot_genes(n=n_genes)
+            self._write_r_inputs(tmp_dir)
+            self._write_gene_block(genes, tmp_dir, "pilot")
+            out = f"{tmp_dir}/results_pilot.csv"
+            if not Path(out).exists():
+                self._run_glmm_fit(tmp_dir, "pilot", "pilot", out)
+            pilot = pd.read_csv(out)
+            pilot_path.parent.mkdir(parents=True, exist_ok=True)
+            pilot.to_csv(pilot_path, index=False)
+
+        mean_hc = np.array([self.Y_hc[:, self._gene_col[g]].mean() for g in pilot["gene"]])
+        alpha_fit = np.exp(-pilot["disp_coef_0"].to_numpy(dtype=float))
+        ok = pilot["ok"].to_numpy(dtype=bool)
+        trend = build_trend_from_fits(mean_hc, alpha_fit, ok=ok)
+        save_trend(trend, trend_path)
+        self.trend_path = trend_path
+        self.alpha_fn = load_trend(trend_path)
+
+        self.disp_prior = estimate_slope_prior(pilot_path)
+        save_disp_prior(self.disp_prior, disp_prior_path)
+
+        mom = build_trend(self.Y_hc[:, list(self._gene_col.values())], min_nz=MP["trend_min_nz"])
+        self.trend_report = trend_report(mean_hc[ok], alpha_fit[ok], trend, self.disp_prior,
+                                         trend_path.parent, mom_trend=mom)
+        return True
+
+    def apply_disp_squeeze(self):
+        """EB squeeze of the dispersion intercept toward the lowess trend, pooled
+        over both stages. Written back into disp_coef[0] so score() needs no
+        stage branch: alpha = exp(-Xa @ disp_coef) already gives the squeezed
+        constant for nbi_intercept_eb (NaN slopes -> 0) and the squeezed intercept plus real
+        slopes for nbi_full_eb."""
+        recs = [r for r in self.genes.values()
+                if r.ok and r.stage in ("nbi_full_eb", "nbi_intercept_eb") and r.disp_coef is not None
+                and r.trend_alpha is not None]
+        if not recs:
+            return
+        hat = np.array([r.disp_coef[0] for r in recs], dtype=np.float64)
+        se = np.array([r.disp_se[0] if r.disp_se is not None else np.nan for r in recs], dtype=np.float64)
+        trend = np.array([-np.log(r.trend_alpha) for r in recs], dtype=np.float64)
+        post, tau_d2 = squeeze_log_theta(hat, se, trend)
+        self.disp_tau_d2 = tau_d2
+        for r, h, p in zip(recs, hat, post):
+            r.log_theta_raw = float(h) if np.isfinite(h) else None
+            r.log_theta_eb = float(p)
+            r.disp_coef[0] = p
+
+    def train(self, limit=None, tmp_dir="/tmp/glmm_train", disp_prior_path=None):
+        model_genes = [g for g, r in self.genes.items() if r.route == "model"][:limit]
+        self._write_r_inputs(tmp_dir)
+        self._write_gene_block(model_genes, tmp_dir, "model")
+        self._run_glmm_fit(tmp_dir, "model", "cascade", f"{tmp_dir}/results.csv",
+                           disp_prior_path=disp_prior_path or config.DISP_PRIOR_PATH)
 
         results = pd.read_csv(f"{tmp_dir}/results.csv").set_index("gene")
+        mu_cols = [c for c in results.columns if c.startswith("mu_coef_")]
+        disp_cols = [c for c in results.columns if c.startswith("disp_coef_")]
+        se_cols = [c for c in results.columns if c.startswith("disp_se_")]
+        txt = lambda row, k: row[k] if k in row.index and not pd.isna(row[k]) else ""
         for g, row in results.iterrows():
             rec = self.genes[g]
             rec.stage, rec.ok, rec.tau2 = row["stage"], bool(row["ok"]), float(row["tau2"])
             rec.singular = bool(row["singular"]) if not pd.isna(row["singular"]) else False
-            rec.fixed_alpha = float(row["fixed_alpha"]) if "fixed_alpha" in row and not pd.isna(row["fixed_alpha"]) else None
-            rec.mu_coef = row[[c for c in results.columns if c.startswith("mu_coef_")]].values.astype(float)
-            rec.disp_coef = row[[c for c in results.columns if c.startswith("disp_coef_")]].values.astype(float)
-            rec.fail_reason = row["fail_reason"] if not pd.isna(row["fail_reason"]) else ""
-            rec.nbi_reject_reason = row["nbi_reject_reason"] if not pd.isna(row["nbi_reject_reason"]) else ""
-            rec.nbi_disp_intercept_reject_reason = row["nbi_disp_intercept_reject_reason"] if not pd.isna(row["nbi_disp_intercept_reject_reason"]) else ""
-            rec.nb_fixed_reject_reason = row["nb_fixed_reject_reason"] if not pd.isna(row["nb_fixed_reject_reason"]) else ""
+            rec.trend_alpha = float(row["trend_alpha"]) if not pd.isna(row["trend_alpha"]) else None
+            rec.n_outliers = int(row["n_outliers"]) if not pd.isna(row["n_outliers"]) else 0
+            rec.outlier_refit_failed = bool(row["outlier_refit_failed"])
+            rec.mu_coef = row[mu_cols].values.astype(float)
+            rec.disp_coef = row[disp_cols].values.astype(float)
+            rec.disp_se = row[se_cols].values.astype(float)
+            rec.fail_reason = txt(row, "fail_reason")
+            rec.nbi_full_eb_reject_reason = txt(row, "nbi_full_eb_reject_reason")
+            rec.nbi_intercept_eb_reject_reason = txt(row, "nbi_intercept_eb_reject_reason")
             if not rec.ok:
                 rec.route = "excluded"
 
+        self.apply_disp_squeeze()
         self.train_pool(tmp_dir=tmp_dir)
 
     def train_pool(self, tmp_dir="/tmp/glmm_train"):
@@ -183,10 +286,12 @@ class NormativeModelEngineMixed:
 
     def training_summary(self):
         rows = [dict(gene=r.name, route=r.route, stage=r.stage, nz=r.nz, ok=r.ok,
-                    singular=r.singular, tau2=r.tau2, fail_reason=r.fail_reason,
-                    nbi_reject_reason=r.nbi_reject_reason,
-                    nbi_disp_intercept_reject_reason=r.nbi_disp_intercept_reject_reason,
-                    nb_fixed_reject_reason=r.nb_fixed_reject_reason)
+                    singular=r.singular, tau2=r.tau2, tau2_collapsed=bool(r.tau2 < 1e-4),
+                    trend_alpha=r.trend_alpha, log_theta_raw=r.log_theta_raw, log_theta_eb=r.log_theta_eb,
+                    n_outliers=r.n_outliers, outlier_refit_failed=r.outlier_refit_failed,
+                    fail_reason=r.fail_reason,
+                    nbi_full_eb_reject_reason=r.nbi_full_eb_reject_reason,
+                    nbi_intercept_eb_reject_reason=r.nbi_intercept_eb_reject_reason)
                for r in self.genes.values()]
         return pd.DataFrame(rows).set_index("gene")
 
@@ -213,8 +318,8 @@ class NormativeModelEngineMixed:
             mu = np.clip(np.exp(Xa @ np.nan_to_num(rec.mu_coef, nan=0.0)), 1e-6, 1e8)
             if not np.all(np.isnan(rec.disp_coef)):
                 alpha = np.exp(-Xa @ np.nan_to_num(rec.disp_coef, nan=0.0))
-            elif rec.fixed_alpha is not None:
-                alpha = np.full(len(X_test), rec.fixed_alpha)
+            elif rec.trend_alpha is not None:
+                alpha = np.full(len(X_test), rec.trend_alpha)
             else:
                 alpha = np.full(len(X_test), self.alpha_fn(float(mu.mean())))
             Z[:, j] = marginal_nb_rqr(Y_test[:, j].astype(np.float64), mu, alpha, rec.tau2, seed + j)
@@ -226,6 +331,11 @@ class NormativeModelEngineMixed:
         with open(directory / "scaler.pkl", "wb") as f: pickle.dump(self.scaler, f)
         if self.rare_glm is not None:
             with open(directory / "rare_glm.pkl", "wb") as f: pickle.dump(self.rare_glm, f)
+        if self.disp_prior is not None:
+            save_disp_prior(self.disp_prior, directory / "disp_prior.json")
+        (directory / "eb_meta.json").write_text(json.dumps(
+            {"disp_tau_d2": self.disp_tau_d2, "disp_tau_d": None if self.disp_tau_d2 is None else self.disp_tau_d2 ** 0.5,
+             "tau_slope": None if self.disp_prior is None else self.disp_prior["tau_slope"]}, indent=2))
         self.training_summary().to_csv(directory / "training_summary.csv")
 
     @classmethod
@@ -237,5 +347,11 @@ class NormativeModelEngineMixed:
         rare_glm_path = directory / "rare_glm.pkl"
         if rare_glm_path.exists():
             with open(rare_glm_path, "rb") as f: engine.rare_glm = pickle.load(f)
-        engine.alpha_fn = load_trend()
+        engine.disp_prior = load_disp_prior(directory / "disp_prior.json")
+        eb_meta_path = directory / "eb_meta.json"
+        if eb_meta_path.exists():
+            engine.disp_tau_d2 = json.loads(eb_meta_path.read_text()).get("disp_tau_d2")
+        trend_path = directory / "dispersion_trend.json"
+        engine.trend_path = trend_path if trend_path.exists() else config.DISPERSION_TREND_PATH
+        engine.alpha_fn = load_trend(engine.trend_path)
         return engine

@@ -13,8 +13,10 @@ then smoothed with lowess in log-log space (log(sigma) ~ log(mu)); a single
 log-log line underfits both the low-mu plateau and the high-mu asymptote, so
 lowess is the canonical trend, matching edgeR/DESeq2 trended-dispersion shape.
 
-Route B modeling fixes each gene's dispersion at alpha_of(mean_train), so the
-covariates spend all their degrees of freedom on the mean.
+SUPERSEDED for production use by build_trend_from_fits below -- this covariate-free
+MoM trend is systematically biased as a conditional-dispersion trend (see that
+function's docstring for the measured magnitude). Kept as the unconditional
+diagnostic reference only.
 """
 
 import json
@@ -70,6 +72,24 @@ def build_trend(Y_hc, min_nz=None, n_bins=25, min_bin=20, lowess_frac=0.5):
         "alpha_floor": MP["alpha_floor"], "alpha_cap": MP["alpha_cap"],
         "min_nz": min_nz, "n_reliable": int(reliable.sum()), "n_bins_used": len(bins),
         "lowess_logmu": sm_curve[:, 0].tolist(), "lowess_logsigma": sm_curve[:, 1].tolist(),
+    }
+
+
+def build_trend_from_fits(mean_hc, alpha_fit, ok=None, frac=0.3, it=3):
+    mean_hc = np.asarray(mean_hc, dtype=np.float64)
+    alpha_fit = np.asarray(alpha_fit, dtype=np.float64)
+    keep = (mean_hc > 0) & np.isfinite(alpha_fit) & (alpha_fit > 0)
+    if ok is not None:
+        keep &= np.asarray(ok, dtype=bool)
+    x, y = np.log(mean_hc[keep]), np.log(alpha_fit[keep])
+    o = np.argsort(x)
+    sm = lowess(y[o], x[o], frac=frac, it=it, return_sorted=True)
+    return {
+        "a0": None, "a1": None,  # legacy parametric slot, unused (lowess is canonical)
+        "alpha_floor": MP["alpha_floor"], "alpha_cap": MP["alpha_cap"],
+        "source": "fitted_conditional_alpha", "n_genes": int(keep.sum()),
+        "lowess_frac": frac, "lowess_it": it,
+        "lowess_logmu": sm[:, 0].tolist(), "lowess_logsigma": sm[:, 1].tolist(),
     }
 
 
