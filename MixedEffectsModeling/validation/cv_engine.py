@@ -1,3 +1,4 @@
+import argparse
 import pickle
 import subprocess
 import sys
@@ -5,25 +6,17 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.stats import kurtosis, norm, skew
 from sklearn.model_selection import StratifiedKFold
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 import MixedEffectsModeling.config as config
+from MixedEffectsModeling.core.calibration import gene_shash_calibration
 from MixedEffectsModeling.core.dispersion_trend import load_trend
 from MixedEffectsModeling.core.marginal_rqr import marginal_nb_rqr
 from MixedEffectsModeling.core.model_engine_mixed import NormativeModelEngineMixed
 
 MP = config.SPIKE_PARAMS
-
-
-def _w1_normal(z):
-    v = z[np.isfinite(z)]
-    n = len(v)
-    if n < 8:
-        return np.nan
-    ref = norm.ppf(np.linspace(1 / (2 * n), 1 - 1 / (2 * n), n))
-    return float(np.mean(np.abs(np.sort(v) - ref)))
+SHASH_MAX_N = 3000
 
 
 # Every (gene, fold) pair is recorded here regardless of convergence -- the
@@ -94,12 +87,17 @@ def cv_model_route(e2, model_genes, stage_of, folds, tmp):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--limit-genes", type=int, default=None,
+                    help="smoke test: only run CV on the first N model-route genes")
+    args = ap.parse_args()
+
     out_dir = config.CV_MIXED_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
 
     summary = pd.read_csv(config.ENGINE_MIXED_DIR / "training_summary.csv", index_col="gene")
     summary = summary[summary["ok"]]
-    model_genes = summary.index[summary["route"] == "model"].tolist()
+    model_genes = summary.index[summary["route"] == "model"].tolist()[:args.limit_genes]
     stage_of = summary["stage"].to_dict()
 
     e2 = NormativeModelEngineMixed()
@@ -118,23 +116,44 @@ def main():
     fold_stats.to_csv(out_dir / "fold_stats.csv", index=False)
     print(f"fold success rate: {fold_stats['ok'].mean():.3f} ({int(fold_stats['ok'].sum())}/{len(fold_stats)})")
 
+    engine = NormativeModelEngineMixed.load(config.ENGINE_MIXED_DIR)
+
     stats = []
     for g, z in zdict.items():
         v = z[np.isfinite(z)]
         if len(v) < 8:
             continue
         nz = int((e2.Y_hc[:, e2._gene_col[g]] > 0).sum())
+        z_sub = v if len(v) <= SHASH_MAX_N else np.random.default_rng(42).choice(v, SHASH_MAX_N, replace=False)
+        calib = gene_shash_calibration(z_sub)
+
+        cv_fields = dict(
+            cv_shash_ok=calib["shash_ok"], cv_shash_xi=calib["shash_xi"],
+            cv_shash_eta=calib["shash_eta"], cv_shash_eps=calib["shash_eps"],
+            cv_shash_delta=calib["shash_delta"], cv_shash_z_lo=calib["z_lo"], cv_shash_z_hi=calib["z_hi"],
+            cv_raw_skew=calib["raw_skew"], cv_raw_kurtosis=calib["raw_kurtosis"],
+            cv_corrected_skew=calib["corrected_skew"], cv_corrected_kurtosis=calib["corrected_kurtosis"],
+            cv_naive_exceed=calib["naive_exceed"], cv_shash_exceed=calib["shash_exceed"],
+            cv_naive_fdr_reject_rate=calib["naive_fdr_reject_rate"], cv_corr_fdr_reject_rate=calib["corr_fdr_reject_rate"],
+        )
+
+        rec = engine.genes.get(g)
+        if rec is not None:
+            for k, val in cv_fields.items():
+                setattr(rec, k, val)
+
         stats.append(dict(gene=g, route="model", stage=stage_of[g], nz=nz,
-                          w1=_w1_normal(v), mean_z=float(v.mean()), std_z=float(v.std()),
-                          skew_z=float(skew(v)), kurt_z=float(kurtosis(v)), n_valid=len(v)))
+                          mean_z=float(v.mean()), std_z=float(v.std()), n_valid=len(v), **cv_fields))
+
     df = pd.DataFrame(stats)
     df.to_csv(out_dir / "cv_stats.csv", index=False)
     with open(out_dir / "cv_zscores.pkl", "wb") as f:
         pickle.dump(zdict, f)
     with open(out_dir / "cv_ppc.pkl", "wb") as f:
         pickle.dump(ppc_dict, f)
-    print(df.groupby("stage")[["w1", "mean_z", "std_z"]].median().to_string())
-    print(f"Saved -> {out_dir}/fold_stats.csv, cv_stats.csv, cv_zscores.pkl, cv_ppc.pkl")
+    engine.save(config.ENGINE_MIXED_DIR)
+    print(df.groupby("stage")[["mean_z", "std_z"]].median().to_string())
+    print(f"Saved -> {out_dir}/fold_stats.csv, cv_stats.csv, cv_zscores.pkl, cv_ppc.pkl, updated {config.ENGINE_MIXED_DIR}/genes.pkl")
 
 
 if __name__ == "__main__":

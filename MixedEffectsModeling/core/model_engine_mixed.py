@@ -36,6 +36,21 @@ class GeneRecordMixed:
     nb_fixed_reject_reason: str = ""
     mean_hc: float = None
     fixed_alpha: float = None
+    cv_shash_ok: bool = None
+    cv_shash_xi: float = None
+    cv_shash_eta: float = None
+    cv_shash_eps: float = None
+    cv_shash_delta: float = None
+    cv_shash_z_lo: float = None
+    cv_shash_z_hi: float = None
+    cv_raw_skew: float = None
+    cv_raw_kurtosis: float = None
+    cv_corrected_skew: float = None
+    cv_corrected_kurtosis: float = None
+    cv_naive_exceed: float = None
+    cv_shash_exceed: float = None
+    cv_naive_fdr_reject_rate: float = None
+    cv_corr_fdr_reject_rate: float = None
 
 
 class NormativeModelEngineMixed:
