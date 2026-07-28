@@ -35,6 +35,14 @@ Batch enters the mean submodel only (`(1|batch__)`), not dispersion -- a fixed b
 
 `training_summary.csv` has `tau2_collapsed` (`tau2 < 1e-4`, ~30% of genes) -- the R-side `singular` flag (`pdHess` FALSE) does not catch this.
 
+### 1a-3. `tau2_max = 3.0` (2026-07-28)
+
+Decoupled from `beta_explode_thr ** 2` (=9). That value was a numeric divergence guard; this one is a **power** criterion, and conflating them hid the distinction. Both stages gate on it (`is_converged`, `glmm_helpers.R:155,166`), and `fit_one_cascade` returns at `nbi_intercept_eb` regardless of `ok`, so failing both -> `route="excluded"`.
+
+Motivation: a large `tau2` does **not** break calibration. Per-tau2-bin held-out-style checks (`0_insample_analysis.ipynb` sec. 3) give `rqr_msq` 0.98-1.03, `cov_95` 0.957-0.963, 95%-exceedance 0.046-0.051 at *every* bin including `tau2 > 5` -- the marginal `pred_var` blows up as `exp(2*tau2)` while the quantiles barely move, so the PPC variance panel is a moment artifact, not miscalibration. What a large `tau2` actually costs is detection power: the predictive distribution widens until the count needed for `|z|=3` leaves the observable range. Section 13 of that notebook computes `y_crit` (the z=3 count) per gene and compares it to the largest count ever observed for that gene; the undetectable rate is 0% below tau2~0.5 and climbs to 15-34% above 3.
+
+Caveats kept deliberately: the cut removes 305 genes (1.6%) of which only ~21% are demonstrably undetectable -- no `tau2` threshold separates the two populations cleanly (precision never exceeds 30% at any cutoff). It is accepted because the collateral is low-expression (median mu ~0.05), not because the threshold is sharp. A direct `y_crit`-based filter was evaluated and **rejected**: it is cohort-bound (it cannot tell "model too wide" from "no such sample in this cohort") and overlaps a depth-based criterion on only 27 of 113 genes.
+
 ### 1b. PCIS Outlier Removal (`core/glmm_helpers.R:pcis_outliers`)
 
 **PCIS = Prior-Conditioned Impact Score.** Cook-shaped, deliberately not Cook's distance:
@@ -69,7 +77,17 @@ $$\log(\mu_{i,g}) = \log(\bar{Y}_{g,HC} + \epsilon) + \beta_0 + \sum_{k=1}^{10}\
 
 Poisson first; if Pearson-residual overdispersion ratio exceeds a threshold (e.g. 2.0), refit NB2 with $\log\theta=\gamma_0$.
 
-**Currently unused**: `nz_a_max` (pooling-vs-cascade cutoff) is undetermined, defaults to 0, so every gene routes to the cascade above. `fit_pooled_glmm`/`glmm_fit_pool.R` stay in place for when it's picked.
+**`nz_a_max = 25`** (2026-07-28, provisional -- pending CV, see below). Set empirically from the completed `nz_a_max=0` run (`engine_state_mixed_tau9_nopool_20260728/`, every gene forced through the individual cascade), which makes the pooling boundary measurable rather than assumed: the cutoff should sit where individual fitting actually stops working.
+
+Convergence failure by nz: 92% (1-5) / 62% (6-10) / 42% (11-15) / 18% (16-20) / 10% (21-25) / 8% (26-30) / 4.5% (31-40) / 1.5% (41-50). The knee is at nz~20-25; above it individual fits essentially always converge.
+
+Raising the cutoff past the knee is a losing trade, because pooling *downgrades* a gene that fits individually -- it loses its own $\beta$ to the shared one, which is the whole premise of per-gene normative modeling. Rescued (would fail individually) vs downgraded (fits fine) at each cutoff: 4.70 at nz 10, 2.41 at 15, 1.57 at 20, **1.21 at 25**, 0.97 at 30, 0.74 at 40. At 40, 1,423 of the 2,475 pooled genes (58%) were fitting fine. Going 25 -> 40 buys 90 more rescues for 626 more downgrades.
+
+Failures that remain above nz~25 are mostly `tau2 > tau2_max`, not non-convergence, and **pooling does not fix those** -- the pooled model keeps the same $b_j$ random intercept. So there is nothing to gain there.
+
+**Unverified assumption**: all of the above counts a low-nz gene as "rescued" on the premise that the pooled fit succeeds and is calibrated. `train_pool`/`glmm_fit_pool.R` have never been run on real HC data. Until CV confirms the pool route's held-out Z is calibrated, the threshold argument is conditional.
+
+**Tension with the earlier estimate**: a 2026-07-24 v2-engine analysis (`individual_fit_success.csv`, see [[project_mixed_effects_pooling_threshold]]) put the boundary near nz~50 from *per-fold* convergence (all 5 CV folds converging, ~554 training samples each) -- a strictly harder bar than the single full-cohort fit measured here (676 samples), and on a different cascade. The upcoming CV run measures the fold-level rate on the current engine directly and is what should settle the gap; if fold-level convergence at nz 25-50 turns out poor, raise the cutoff.
 
 ---
 

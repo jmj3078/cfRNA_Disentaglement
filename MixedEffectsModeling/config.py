@@ -37,7 +37,8 @@ BIAS_COLUMNS = [
 
 STRATIFY_COL = "Batch_ID"
 
-NZ_A_MAX = 40
+# Pooling cutoff. Set from the nz_a_max=0 run (every gene through the individual cascade)
+NZ_A_MAX = 25
 MIN_HC_BATCH_SIZE = 5
 
 SPIKE_PARAMS = {
@@ -60,7 +61,7 @@ EB_PARAMS = {
 
 FIT_PARAMS = {
     "beta_explode_thr": SPIKE_PARAMS["beta_explode_thr"],
-    "tau2_max": SPIKE_PARAMS["beta_explode_thr"] ** 2,
+    "tau2_max": 3.0,
     "disp_intercept_max": 10.0,
     "pcis_cut": 2.25,
     "max_outlier_frac": 0.05,
