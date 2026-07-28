@@ -149,8 +149,8 @@ by measurement:
 Because the variance is not the fitted model's, the one-step deletion
 approximation does not hold: **`qf(0.99, p_eff, n-p_eff)` is an inherited DESeq2
 threshold convention, not a distributional result.** PCIS has no F reference
-distribution. Its only calibration evidence is that clean simulated data produced
-zero flags. Observations are dropped (largest PCIS first, at most
+distribution, and the empirical null (below) shows the convention resolves to a
+per-observation rate of 1.16e-4, not 0.01. Observations are dropped (largest PCIS first, at most
 `floor(0.05*n)`) and the stage is refit once with `droplevels` -- HC has 5
 singleton batches, so removing one observation can empty a random-effect level.
 Replacement by a trimmed mean was rejected: it fabricates counts and biases
@@ -175,6 +175,23 @@ a conservative filter for gross contamination in well-expressed genes, not a
 general outlier detector. A proposal to anchor only the dispersion intercept
 while keeping the fitted slopes was tested and **refuted**: 0 of 3 detected,
 worse than the trend scalar.
+
+**Empirical null, full run (`PCIS_Calibration/`, see its README).** Each gene's
+own fitted `(beta, gamma, tau^2)` regenerate clean counts on the real design, the
+same stage is refit under the same prior, and PCIS is recomputed -- 19,158 genes x
+693 observations. The current threshold's realized null rates are per-observation
+1.16e-4 and per-gene FWER 6.94%, against a real-data 7.78% of genes with any
+removal (0.096/gene vs 0.081/gene null): **84% of current removals are
+attributable to the null**, i.e. the threshold is strict enough to have almost no
+power. It is also mis-shaped in the tail -- null max PCIS peaks at `log_mu ~ 2-3`
+while `qf` decreases monotonically, giving realized FWER 0.7%-11.4% across
+expression deciles. Two calibrated replacements are derived and stored: a pooled
+constant (2.7054 at FWER 0.05) which does not fix the shape, and a smooth
+`bs(log_mu, df=6)` quantile regression which flattens realized FWER to 4.0-6.6%
+(`tau2` and `p_eff` add nothing). **The threshold is not yet changed in
+`config.FIT_PARAMS`** -- the target rate form/value is an open decision, and the
+real per-observation PCIS distribution (needed for an empirical FDR curve) has not
+been extracted yet.
 
 ### 1c. Per-Gene SHASH Calibration (`core/calibration.py`)
 Unchanged from v2. Normative modeling requires held-out HC Z-scores to be
@@ -207,7 +224,7 @@ $$\log(\mu_{i,g}) = \log(\bar{Y}_{g, HC} + \epsilon) + \beta_0 + \sum_{k=1}^{10}
 
 * **Iterative Refinement:** The methodologies outlined above are experimental and subject to structural revisions. The optimal normative modeling strategy will be determined iteratively by modifying and debugging the core logic.
 * **Directory Enforcement:**
-* `/core`: Exclusively reserved for the core modeling engine logic. `glmm_helpers.R`(per-gene fit + Cook's-distance outlier removal + pooled-GLM fit primitives) · `glmm_fit.R`(CLI, `--mode cascade|pilot|fixed_stage`, `--disp-prior`) · `eb_shrinkage.py`(EB prior sd estimation + dispersion-intercept squeeze) · `glmm_fit_pool.R`(pooled-GLM CLI, unused this round) · `dispersion_trend.py`(`build_trend_from_fits` = canonical covariate-adjusted trend; `build_trend` = covariate-free diagnostic reference) · `trend_report.py`(always-on trend/prior calibration figure) · `marginal_rqr.py`(tau2-marginalized RQR/log-likelihood, Gauss-Hermite) · `model_engine_mixed.py`(`NormativeModelEngineMixed`/`GeneRecordMixed`) · `calibration.py`(per-gene SHASH calibration) · `run_engine.py`(entry point: `python core/run_engine.py [--limit N] [--pilot-genes N] [--resume]`, writes `engine_state_mixed/`: adds `disp_prior.json` and `eb_meta.json` to the saved state)
+* `/core`: Exclusively reserved for the core modeling engine logic. `glmm_helpers.R`(per-gene fit + Cook's-distance outlier removal + pooled-GLM fit primitives) · `glmm_fit.R`(CLI, `--mode cascade|pilot|fixed_stage`, `--disp-prior`) · `eb_shrinkage.py`(EB prior sd estimation + dispersion-intercept squeeze) · `glmm_fit_pool.R`(pooled-GLM CLI, unused this round) · `dispersion_trend.py`(`build_trend_from_fits` = canonical covariate-adjusted trend; `build_trend` = covariate-free diagnostic reference) · `trend_report.py`(always-on trend/prior calibration figure) · `marginal_rqr.py`(tau2-marginalized RQR/log-likelihood, Gauss-Hermite) · `model_engine_mixed.py`(`NormativeModelEngineMixed`/`GeneRecordMixed`) · `calibration.py`(per-gene SHASH calibration) · `pcis_null.R`(PCIS empirical-null simulator: regenerates clean counts from each gene's own fit, refits, recomputes PCIS) · `pcis_calibration.py`(`run_all()` -> `PCIS_Calibration/`: null rates, threshold A/B derivation, figures) · `run_engine.py`(entry point: `python core/run_engine.py [--limit N] [--pilot-genes N] [--resume]`, writes `engine_state_mixed/`: adds `disp_prior.json` and `eb_meta.json` to the saved state)
 * `/validation`: Designated for large-scale validation pipelines and auditing scripts. `cv_engine.py`(5-fold CV with explicit per-`(gene, fold)` success/failure logging to `fold_stats.csv` — written this round, **not yet executed**: the actual CV run and the SHASH-based per-gene comprehensive report are deferred to a follow-up plan)
 * `/_legacy/core_v1`, `/_legacy/validation_v1`: pre-2026-07-25 4-stage-cascade engine and its validation scripts, kept for reference/reproducibility only — do not import from or modify.
 * **Root Directory (`.ipynb`):** All visualizations, tabular summaries, and analytical reviews must be conducted in Jupyter notebooks within the current working directory to allow immediate evaluation.
