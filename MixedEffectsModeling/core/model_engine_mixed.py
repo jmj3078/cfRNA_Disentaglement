@@ -110,11 +110,7 @@ class NormativeModelEngineMixed:
         self._gene_col = {g: pc_indices[i] for i, g in enumerate(self.pc_gene_names)}
 
     def assign_routes(self):
-        # nz_a_max is deferred -- default to 0 (no gene routed to "pool", every
-        # gene attempts the model cascade) until a real threshold is chosen and
-        # Threshold_Sweep/nz_a_max.txt exists.
-        nz_a_max_path = config.THRESHOLD_SWEEP_DIR / "nz_a_max.txt"
-        self.nz_a_max = int(nz_a_max_path.read_text().strip()) if nz_a_max_path.exists() else 0
+        self.nz_a_max = config.NZ_A_MAX
         nz = (self.Y_hc[:, list(self._gene_col.values())] > 0).sum(axis=0)
         for i, g in enumerate(self.pc_gene_names):
             n = int(nz[i])

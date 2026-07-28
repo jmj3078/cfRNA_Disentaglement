@@ -40,6 +40,8 @@ BIAS_COLUMNS = [
 
 STRATIFY_COL = "Batch_ID"
 
+NZ_A_MAX = 40
+
 SPIKE_PARAMS = {
     "beta_explode_thr": 3.0,
     "seed": 42,
