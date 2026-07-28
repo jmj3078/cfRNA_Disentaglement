@@ -3,7 +3,7 @@
 /RPM_nfcore/*
 **/__pycache__/
 /_legacy/*
-.claude
+.vscode
 *.json
 *.h5ad
 *.pkl
@@ -13,3 +13,8 @@
 *.log
 *.parquet
 *.csv.gz
+
+#CLAUDE
+.claude
+*/CLAUDE.md
+/docs/*
