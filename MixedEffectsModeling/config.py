@@ -65,7 +65,7 @@ FIT_PARAMS = {
     "beta_explode_thr": SPIKE_PARAMS["beta_explode_thr"],
     "tau2_max": SPIKE_PARAMS["beta_explode_thr"] ** 2,
     "disp_intercept_max": 10.0,
-    "pcis_f_q": 0.99,
+    "pcis_cut": 2.28,
     "max_outlier_frac": 0.05,
     "chunk_size": 200,
     "cores": 12,

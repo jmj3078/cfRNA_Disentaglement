@@ -1,91 +1,74 @@
-# PCIS Threshold Calibration (2026-07-28)
+# PCIS Threshold Calibration
 
-Empirical null distribution of PCIS and the two candidate replacement thresholds
-for the inherited `qf(0.99, p_eff, n-p_eff)` convention (which has no
-distributional justification -- see `MixedEffectsModeling/CLAUDE.md` section 1b).
+Measures how much of PCIS outlier removal is just noise, by building an
+empirical null: does the same statistic still fire this often when there is
+nothing to detect. Used to fix `config.FIT_PARAMS["pcis_cut"]`, replacing the
+inherited-but-unjustified `qf(0.99, p_eff, n-p_eff)` convention (PCIS has no F
+reference distribution -- see `MixedEffectsModeling/CLAUDE.md` section 1b).
 
-Reproduce with:
+Reproduce:
 
 ```
 python MixedEffectsModeling/core/run_engine.py                  # -> cascade fits
 Rscript MixedEffectsModeling/core/pcis_null.R <results.csv> <workdir> <out.csv> 1 12 <disp_prior.json>
-python MixedEffectsModeling/core/pcis_calibration.py <out.csv>  # -> everything here
+python MixedEffectsModeling/core/pcis_calibration.py <out.csv>  # -> pcis_rate_table.csv + figure
 ```
 
-## How the null was generated (`core/pcis_null.R`)
+## Method (`core/pcis_null.R`)
 
-For every converged gene, its own fitted `(beta, gamma, tau^2)` regenerate clean
-counts on the real design matrix: `u_j ~ N(0, tau^2)`, `y* ~ NB2(mu_0 e^u, 1/alpha_i)`.
-The same stage is then refit with the same EB slope prior, and PCIS is recomputed
-by the exact `pcis_outliers` formula (`pcis_vec` mirrors it). Top 50 PCIS values
-per gene are kept -- the top 7.2% of 693 observations, which resolves the upper
-tail down to a per-observation rate of 1e-5. 1 replicate per gene suffices because
-one replicate already yields 693 null PCIS draws for that gene.
+For every converged gene, its own fitted `(beta, gamma, tau^2)` regenerate
+clean counts on the real design matrix: `u_j ~ N(0, tau^2)`, `y* ~ NB2(mu_0
+e^u, 1/alpha_i)`. The same stage is refit under the same EB slope prior, and
+PCIS is recomputed by the exact `pcis_outliers` formula. Since these y* have
+no injected contamination, any PCIS value that clears a threshold there is by
+construction a false positive. Top 50 PCIS values per gene are kept (top 7.2%
+of 693 observations per gene).
 
-19,158 genes x 693 observations = 13,276,494 null observations. No gene saturated
-the top-50 cap at any threshold considered.
+19,158 genes x 693 observations = 13,276,494 null draws (`null_pcis_top50_raw.csv.gz`).
 
-## Headline result
+## Result (`pcis_rate_table.csv`)
 
-The current threshold sits where it cannot distinguish signal from noise:
+Target rates are **population-level per-observation false-alarm rates**
+(`n_genes * n_obs` = 13,276,494 as the denominator), not a quantile of the
+retained top-50-per-gene pool -- an earlier version of this table picked cuts
+via `np.quantile` on that pool directly, which mislabels percentiles badly
+(its "0.90" corresponded to roughly the population's 99.3rd percentile,
+because the pool is already restricted to each gene's most extreme 7.2%).
+`max_removed_per_gene` confirms no row here hits the 50-per-gene retention cap
+(no truncation bias):
 
-| | genes with >=1 removal | mean removals/gene |
-|---|---|---|
-| real data | 7.78% | 0.0960 |
-| **null simulation** | **6.94%** | **0.0806** |
+| target rate | population %ile | cut | null removed/gene | real removed/gene | null share |
+|---|---|---|---|---|---|
+| 1e-3 | 99.90% | 0.305 | 0.693 | 0.096 | 7.2x |
+| 5e-4 | 99.95% | 0.574 | 0.346 | 0.096 | 3.6x |
+| 3e-4 | 99.97% | 0.899 | 0.208 | 0.096 | 2.2x |
+| 2e-4 | 99.98% | 1.293 | 0.139 | 0.096 | 1.4x |
+| 1.5e-4 | 99.985% | 1.628 | 0.104 | 0.096 | 1.08 (breakeven) |
+| **1e-4** | **99.99%** | **2.282** | **0.069** | 0.096 | **0.72** |
+| 5e-5 | 99.995% | 4.239 | 0.035 | 0.096 | 0.36 |
+| 1e-5 | 99.999% | 18.61 | 0.007 | 0.096 | 0.07 |
 
-84% of current removals are attributable to the null. Its realized rates are a
-per-observation false-alarm rate of 1.16e-4 (1/86 of the nominal 0.01) and a
-per-gene FWER of 6.94%.
-
-The threshold is also mis-shaped in the FWER view: null max PCIS peaks at
-`log_mu ~ 2-3` (q95 = 4.74) and is small at both ends (0.65 at the lowest decile),
-while `qf` decreases monotonically in `log_mu`. Realized FWER therefore spans
-0.7% to 11.4% (17x). In the per-observation view the current threshold is already
-near-uniform (1.0e-4 to 2.2e-4 over 20 bins), so the two target forms disagree
-about whether the current shape is broken.
-
-## Candidate thresholds
-
-Target per-gene FWER 0.05:
-* **A (pooled constant)** = 2.7054. Overall exactly 0.05 but retains the shape
-  problem (0.6% to 9.3% across deciles).
-* **B (smooth)** = `exp(QuantReg(log max PCIS ~ bs(log_mu, df=6), q=0.95))`.
-  Overall 0.0501, per-decile 4.0-6.6%. Adding `tau2` and `bs(log p_eff)` changes
-  realized FWER by <0.0002 and pinball loss by 2.6%, so `log_mu` alone is used.
-
-Target per-observation rate: pooled empirical quantile within 20 `log_mu` bins,
-lowess-smoothed on the log scale (`frac=0.5, it=3`).
-
-**Deployment caveat:** the `bs` basis extrapolates catastrophically below the
-observed `log_mu` support -- the fitted cut reaches 1.5e-7 for the 20 genes below
-the 0.1th percentile. Any deployed threshold function needs a floor / clamp to the
-`grid_log_mu_range` recorded in `summary.json`.
+Null-driven removals cross below the observed real removal rate between rate
+1.5e-4 and 1e-4. **`pcis_cut = 2.28`** (rate 1e-4) is deployed, giving headroom
+above that breakeven. This range brackets the old `qf(0.99,...)` cut (~1.98) --
+that convention turned out to be numerically close to the calibrated value
+despite having no theoretical basis for this statistic.
 
 ## Files
 
 | file | contents |
 |---|---|
-| `summary.json` | all scalar results: current-threshold null rates, real-vs-null comparison, A cuts (both target forms), B fit params + realized rates + support range |
-| `null_pcis_top50_raw.csv.gz` | raw simulation output, 957,900 rows (gene x rank 1-50) with `log_mu`, `trend_alpha`, `tau2`, `p_eff`, `cut_current`, `pcis` |
-| `null_max_pcis_per_gene.csv.gz` | one row per gene: null max PCIS + fitted B cuts at each FWER target |
-| `fwer_by_expression_decile.csv` | per-decile null q95/q99 and realized FWER for current / A / B |
-| `covariate_dependence.csv` | Spearman of log max PCIS vs each candidate covariate (all \|r\| <= 0.13; `log_mu` is 0.016 because the dependence is non-monotone, peaked at mid-expression) |
-| `threshold_B_model_comparison.csv` | 4 candidate B formulas: params, realized FWER, pinball loss, cut range |
-| `threshold_B_curve_fwer{0.05,0.01}.csv` | 200-point `log_mu` -> cut lookup for B, FWER targets |
-| `threshold_B_curve_per_obs_rate{1e-3,1e-4}.csv` | same, per-observation-rate targets |
-| `per_obs_bins_rate{1e-3,1e-4}.csv` | the 20 `log_mu` bins behind those curves: empirical cut, smoothed cut, current cut, current realized rate |
-| `cascade_fit_results.csv` | the R-side cascade output the null was generated from (20,097 genes, all coefficients) |
-| `fit_params.json` | `config.FIT_PARAMS` as actually used by the run |
-| `Figures/null_max_pcis.png` | null max PCIS distribution; PCIS vs `log_mu` with null q95, current cut, B curve |
-| `Figures/fwer_by_expression.png` | realized null FWER by expression decile, current / A / B vs target |
-| `Figures/per_obs_thresholds.png` | per-observation-rate cuts: empirical bins, lowess B, current cut |
+| `pcis_rate_table.csv` | the table above |
+| `null_pcis_top50_raw.csv.gz` | raw null draws, 957,900 rows (gene x rank 1-50) |
+| `cascade_fit_results.csv` | cascade fit this null was generated from (20,097 genes) |
+| `fit_params.json` | `config.FIT_PARAMS` as used for this run (predates the `pcis_cut` rename; its `pcis_f_q` here is the old key name) |
+| `Figures/null_pcis_distribution.png` | histogram of null PCIS with cut=0.5/1.0/2.0 marked |
 
 ## Still open
 
-The empirical FDR of an outlier call cannot be computed yet: the cascade saves
-only `n_outliers`, not the real per-observation PCIS values, so "real excess /
-total exceedances" as a function of the threshold is unavailable. Extracting the
-real PCIS distribution requires the same harness with the `y*` regeneration
-removed (~4 min), and would let the target rate be read off an FDR curve instead
-of chosen by convention.
+`real removed/gene` above is a single count (`training_summary.csv`'s
+`n_outliers`, averaged) anchored to the old `qf(0.99,...)` cut (~1.98) -- the
+real per-observation PCIS values were never saved during the cascade run, so
+the true real-vs-null crossover as a function of cut is inferred from one
+reference point, not measured directly. Deliberately left unresolved: the
+constant threshold is the simpler, sufficient answer for now.

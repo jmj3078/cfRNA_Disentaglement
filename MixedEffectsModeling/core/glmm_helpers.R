@@ -62,11 +62,14 @@ disp_se <- function(fit, ncoef) {
 #    complexity was being ignored) and singleton-batch leverage 0.017 -> 0.165
 #    (10x). tau2 -> 0 sends the penalty to infinity, so p_eff -> p automatically.
 #
-# Consequently qf(f_q, p_eff, n - p_eff) is an inherited DESeq2 threshold
-# CONVENTION, not a distributional result -- PCIS has no F reference distribution.
-# It is calibrated only in the sense that clean simulated data produced zero
-# flags. Observations are dropped rather than replaced by a trimmed mean, which
-# would fabricate counts and bias dispersion downward. Returns indices ordered by
+# PCIS has no F reference distribution (see point 1 above), so the cut is a
+# fixed constant read off an empirical null (see PCIS_Calibration/README.md):
+# 19,158 genes x 693 observations regenerated from each gene's own fitted
+# (beta, gamma, tau^2) and refit under the same stage/prior. cut=2.28 targets
+# a population-level per-observation false-alarm rate of 1e-4, just above the
+# point where null-driven removals cross below the observed real removal rate.
+# Observations are dropped rather than replaced by a trimmed mean, which would
+# fabricate counts and bias dispersion downward. Returns indices ordered by
 # decreasing influence.
 #
 # Known blind spot: contamination is absorbed by the dispersion SLOPES, not the
@@ -74,7 +77,7 @@ disp_se <- function(fit, ncoef) {
 # slope estimates and alpha_i at the outlier positions moved far more), so PCIS is
 # insensitive for high-alpha low-expression genes -- 1 of 3 detected at 100x,
 # against 3 of 3 at 20x for a low-alpha high-expression gene.
-pcis_outliers <- function(fit, Xa, y, batch, trend_alpha, f_q, max_frac) {
+pcis_outliers <- function(fit, Xa, y, batch, trend_alpha, cut, max_frac) {
   p <- ncol(Xa); n <- length(y)
   if (n - p < 4) return(integer(0))
   mu <- tryCatch(as.numeric(predict(fit, type = "response")), error = function(e) NULL)
@@ -103,7 +106,7 @@ pcis_outliers <- function(fit, Xa, y, batch, trend_alpha, f_q, max_frac) {
   if (!is.finite(p_eff) || p_eff < 1 || n - p_eff < 4) return(integer(0))
 
   PCIS <- r^2 * h / (p_eff * (1 - h)^2)
-  over <- which(is.finite(PCIS) & PCIS > qf(f_q, p_eff, n - p_eff))
+  over <- which(is.finite(PCIS) & PCIS > cut)
   if (length(over) == 0) return(integer(0))
   n_keep <- min(length(over), floor(max_frac * n))
   if (n_keep < 1) return(integer(0))
@@ -120,7 +123,7 @@ pcis_outliers <- function(fit, Xa, y, batch, trend_alpha, f_q, max_frac) {
 # prior sd for the dispersion SLOPES, estimated by a --mode pilot run.
 fit_stage_gene <- function(y, safe_names, X, batch, stage, tau_slope, trend_alpha,
                            beta_explode_thr, tau2_max, disp_intercept_max,
-                           pcis_f_q, max_outlier_frac) {
+                           pcis_cut, max_outlier_frac) {
   df <- as.data.frame(X); colnames(df) <- safe_names
   df$y__ <- as.integer(round(y))
   df$batch__ <- factor(batch)
@@ -154,7 +157,7 @@ fit_stage_gene <- function(y, safe_names, X, batch, stage, tau_slope, trend_alph
   # PCIS is computed even when the first fit failed the convergence gate --
   # outliers can be the cause of the failure, so the refit gets a chance.
   drop_idx <- pcis_outliers(fit, cbind(1, as.matrix(X)), df$y__, batch,
-                            trend_alpha, pcis_f_q, max_outlier_frac)
+                            trend_alpha, pcis_cut, max_outlier_frac)
   if (length(drop_idx) > 0) {
     # droplevels: HC has 5 singleton batches, so removing one observation can
     # empty a random-effect level entirely.

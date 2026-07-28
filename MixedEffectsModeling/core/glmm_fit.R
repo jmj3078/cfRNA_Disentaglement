@@ -37,7 +37,7 @@ colnames(X) <- safe_names
 # Fallback defaults, identical to config.FIT_PARAMS. They exist only so the
 # script still runs standalone without --fit-params; config.py is the source.
 FP <- list(beta_explode_thr = 3.0, tau2_max = 9.0, disp_intercept_max = 10.0,
-           pcis_f_q = 0.99, max_outlier_frac = 0.05)
+           pcis_cut = 2.28, max_outlier_frac = 0.05)
 if (nzchar(opt$`fit-params`) && file.exists(opt$`fit-params`)) {
   loaded <- fromJSON(opt$`fit-params`)
   for (k in names(FP)) if (!is.null(loaded[[k]])) FP[[k]] <- loaded[[k]]
@@ -47,7 +47,7 @@ if (nzchar(opt$`fit-params`) && file.exists(opt$`fit-params`)) {
 BETA_EXPLODE_THR <- FP$beta_explode_thr
 TAU2_MAX <- FP$tau2_max
 DISP_INTERCEPT_MAX <- FP$disp_intercept_max
-PCIS_F_Q <- FP$pcis_f_q
+PCIS_CUT <- FP$pcis_cut
 MAX_OUTLIER_FRAC <- FP$max_outlier_frac
 
 # EB prior sd for the dispersion SLOPES, one value per covariate, estimated by a
@@ -64,7 +64,7 @@ if (file.exists(opt$out)) done_genes <- read.csv(opt$out)$gene
 
 fit_stage <- function(y, stage, trend_alpha) fit_stage_gene(
   y, safe_names, X, batch, stage, TAU_SLOPE, trend_alpha,
-  BETA_EXPLODE_THR, TAU2_MAX, DISP_INTERCEPT_MAX, PCIS_F_Q, MAX_OUTLIER_FRAC)
+  BETA_EXPLODE_THR, TAU2_MAX, DISP_INTERCEPT_MAX, PCIS_CUT, MAX_OUTLIER_FRAC)
 
 # v3: 2-stage cascade (nbi_full_eb -> nbi_intercept_eb). force-return at nbi_intercept_eb regardless of ok --
 # a gene that fails there is genuinely unmodelable and comes back ok=FALSE

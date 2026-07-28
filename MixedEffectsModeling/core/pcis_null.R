@@ -12,7 +12,6 @@ X <- as.matrix(read.csv(file.path(WORK, "X.csv.gz"), row.names = 1))
 batch <- read.csv(file.path(WORK, "batch.csv.gz"), row.names = 1)[[1]]
 sn <- sanitize_names(colnames(X)); colnames(X) <- sn
 Xa <- cbind(1, X); n <- nrow(Xa); p <- ncol(Xa)
-FP <- fromJSON(file.path(WORK, "fit_params.json"))
 pri <- as.numeric(fromJSON(PRIOR)$tau_slope)
 res <- read.csv(RES); res <- res[res$ok %in% c(TRUE, "TRUE"), ]
 mu_c <- paste0("mu_coef_", 0:10); dp_c <- paste0("disp_coef_", 0:10)
@@ -67,7 +66,6 @@ work <- function(i) {
     top <- sort(pv$pcis, decreasing = TRUE)[seq_len(min(TOPK, n))]
     out[[length(out) + 1]] <- data.frame(gene = row$gene, rep = b, stage = st, n_obs = n,
         log_mu = log(mean(mu0)), trend_alpha = ta, tau2 = t2, p_eff = pv$p_eff,
-        cut_current = qf(FP$pcis_f_q, pv$p_eff, n - pv$p_eff),
         rank = seq_along(top), pcis = top)
   }
   if (!length(out)) NULL else do.call(rbind, out)
