@@ -98,12 +98,19 @@ class NormativeModelEngineMixed:
         adata = adata[adata.obs["Phenotype_Processed"] != "Unknown"]
         adata = adata[adata.obs["broad_protocol_category"] != "Exome-based (EB)"]
         is_hc = (adata.obs["Phenotype_Processed"].astype(str) == "Healthy Control").values
-        X_raw = adata.obs[config.BIAS_COLUMNS].values.astype(np.float64)
+        batch_hc = adata.obs["Batch_ID"].astype(str).values[is_hc]
+
+        # Small batch size samples can cause tau^2 explosion 
+        bsize = pd.Series(batch_hc).value_counts()
+        small = set(bsize.loc[lambda v: v < config.MIN_HC_BATCH_SIZE].index)
+        keep = np.array([b not in small for b in batch_hc])
+
+        X_raw = adata.obs[config.BIAS_COLUMNS].values.astype(np.float64)[is_hc][keep]
         self.scaler = StandardScaler()
-        self.X_hc_scaled = self.scaler.fit_transform(X_raw[is_hc])
-        self.batch = adata.obs["Batch_ID"].astype(str).values[is_hc]
+        self.X_hc_scaled = self.scaler.fit_transform(X_raw)
+        self.batch = batch_hc[keep]
         Y_raw = adata.X.toarray() if issparse(adata.X) else np.asarray(adata.X)
-        self.Y_hc = np.round(Y_raw[is_hc]).astype(np.float64)
+        self.Y_hc = np.round(Y_raw[is_hc][keep]).astype(np.float64)
         is_pc = (adata.var["GeneType"] == "protein_coding").values
         self.pc_gene_names = adata.var_names[is_pc].tolist()
         pc_indices = np.where(is_pc)[0]

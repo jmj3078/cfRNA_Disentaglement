@@ -4,11 +4,8 @@ ROOT = Path(__file__).resolve().parent.parent
 H5AD_PATH = ROOT / "OpenAccess_nfcore" / "Merged_Processed_AnnData_with_Batch_Biases_QC_Status.h5ad"
 GAMLSS_R_HELPER = ROOT / "Modeling" / "gamlss.r"
 
-SPIKE_DIR = Path(__file__).resolve().parent / "Spike_Results"
-
-# Production engine paths -- fully independent of root config.py/Modeling/ by
-# design (see docs/superpowers/specs/2026-07-22-mixed-effects-production-engine-design.md).
 _HERE = Path(__file__).resolve().parent
+
 ENGINE_MIXED_DIR        = _HERE / "engine_state_mixed"
 CV_MIXED_DIR            = _HERE / "CV_Results_mixed"
 CV_MIXED_FIG_DIR        = CV_MIXED_DIR / "Figures"
@@ -41,6 +38,7 @@ BIAS_COLUMNS = [
 STRATIFY_COL = "Batch_ID"
 
 NZ_A_MAX = 40
+MIN_HC_BATCH_SIZE = 5
 
 SPIKE_PARAMS = {
     "beta_explode_thr": 3.0,
@@ -60,15 +58,11 @@ EB_PARAMS = {
     "tau_floor": 1e-3,
 }
 
-# Everything glmm_fit.R needs. Serialised to json and passed as --fit-params, so
-# these constants live here rather than being duplicated as R literals. The R
-# side keeps identical fallback defaults, which is what makes --fit-params safe
-# to add to an already-running pipeline.
 FIT_PARAMS = {
     "beta_explode_thr": SPIKE_PARAMS["beta_explode_thr"],
     "tau2_max": SPIKE_PARAMS["beta_explode_thr"] ** 2,
     "disp_intercept_max": 10.0,
-    "pcis_cut": 2.28,
+    "pcis_cut": 2.25,
     "max_outlier_frac": 0.05,
     "chunk_size": 200,
     "cores": 12,

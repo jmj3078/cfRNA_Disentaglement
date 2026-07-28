@@ -22,7 +22,25 @@ def main():
                          f"{TMP_DIR} instead of starting fresh (only safe against the same code version)")
     ap.add_argument("--out-dir", type=Path, default=config.ENGINE_MIXED_DIR,
                     help="directory to save the trained engine into (defaults to the production engine_state_mixed)")
+    ap.add_argument("--calib-only", action="store_true",
+                    help="stop after prepare_hyperparams (calib_fits.csv/trend/disp_prior) -- skip the "
+                         "full cascade. Use to get a cheap RES for pcis_recalibrate.py before committing "
+                         "to the full (hours-long) retrain.")
+    ap.add_argument("--pcis-cut", type=float, default=None,
+                    help="override config.FIT_PARAMS['pcis_cut'] for this run (e.g. from a prior "
+                         "pcis_recalibrate.py pass) instead of the committed default")
+    ap.add_argument("--nz-a-max", type=int, default=None,
+                    help="override config.NZ_A_MAX for this run (e.g. 0 to route every gene to "
+                         "the cascade, disabling the pooled-GLM route)")
     args = ap.parse_args()
+
+    if args.pcis_cut is not None:
+        config.FIT_PARAMS["pcis_cut"] = args.pcis_cut
+        print(f"pcis_cut override: {args.pcis_cut}")
+
+    if args.nz_a_max is not None:
+        config.NZ_A_MAX = args.nz_a_max
+        print(f"nz_a_max override: {args.nz_a_max}")
 
     if not args.resume:
         shutil.rmtree(TMP_DIR, ignore_errors=True)
@@ -38,12 +56,24 @@ def main():
     n_model = sum(1 for r in engine.genes.values() if r.route == "model")
     print(f"HC={engine.X_hc_scaled.shape[0]} genes={len(engine.genes)} nz_a_max={engine.nz_a_max} pool_route={n_pool} model_route={n_model}")
 
+    # Always (re)write X/batch to TMP_DIR, independent of the trend/disp_prior cache check below --
+    # prepare_hyperparams short-circuits (skips _write_r_inputs) on a cache hit, and --calib-only
+    # stops before train() (which normally writes them). Without this, a cached-hyperparams +
+    # --calib-only run leaves TMP_DIR without X.csv.gz/batch.csv.gz, breaking pcis_recalibrate.py's
+    # WORK dir requirement.
+    engine._write_r_inputs(TMP_DIR)
+
     ran = engine.prepare_hyperparams(trend_path, disp_prior_path, TMP_DIR, args.calib_genes)
     prior = engine.disp_prior
     print(f"hyperparams {'from calib' if ran else 'cached'}: trend -> {trend_path}, prior -> {disp_prior_path}")
     print(f"disp slope EB prior sd (n_calib={prior['n_calib_genes']})")
     for cov, tau in zip(prior["covariates"], prior["tau_slope"]):
         print(f"  tau_slope[{cov}] = {tau:.4f}")
+
+    if args.calib_only:
+        print(f"--calib-only: stopping before the full cascade. RES for pcis_recalibrate.py -> "
+              f"{args.out_dir / 'calib_fits.csv'}, WORK -> {TMP_DIR}")
+        return
 
     engine.train(limit=args.limit, tmp_dir=TMP_DIR, disp_prior_path=disp_prior_path)
     engine.save(args.out_dir)
