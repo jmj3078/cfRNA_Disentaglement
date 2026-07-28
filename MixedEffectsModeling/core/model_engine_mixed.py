@@ -142,11 +142,11 @@ class NormativeModelEngineMixed:
             cmd += ["--disp-prior", str(disp_prior_path)]
         subprocess.run(cmd, check=True, cwd=str(config.GLMM_FIT_R.parent))
 
-    def pilot_genes(self, n=None, n_strata=None, seed=42):
+    def calib_genes(self, n=None, n_strata=None, seed=42):
         """Mean-expression-stratified subsample of model-route genes, so the EB
         prior scale is not dominated by the low-expression bulk."""
-        n = EB["pilot_n_genes"] if n is None else n
-        n_strata = EB["pilot_n_strata"] if n_strata is None else n_strata
+        n = EB["calib_n_genes"] if n is None else n
+        n_strata = EB["calib_n_strata"] if n_strata is None else n_strata
         genes = [g for g, r in self.genes.items() if r.route == "model"]
         mean_hc = self.Y_hc[:, [self._gene_col[g] for g in genes]].mean(axis=0)
         rng = np.random.default_rng(seed)
@@ -161,35 +161,35 @@ class NormativeModelEngineMixed:
                             tmp_dir="/tmp/glmm_train", n_genes=None):
         trend_path = Path(trend_path or config.DISPERSION_TREND_PATH)
         disp_prior_path = Path(disp_prior_path or config.DISP_PRIOR_PATH)
-        pilot_path = trend_path.parent / "pilot_fits.csv"
+        calib_path = trend_path.parent / "calib_fits.csv"
         if trend_path.exists() and disp_prior_path.exists():
             self.trend_path = trend_path
             self.alpha_fn = load_trend(trend_path)
             self.disp_prior = load_disp_prior(disp_prior_path)
             return False
 
-        if pilot_path.exists():
-            pilot = pd.read_csv(pilot_path)
+        if calib_path.exists():
+            calib = pd.read_csv(calib_path)
         else:
-            genes = self.pilot_genes(n=n_genes)
+            genes = self.calib_genes(n=n_genes)
             self._write_r_inputs(tmp_dir)
-            self._write_gene_block(genes, tmp_dir, "pilot")
-            out = f"{tmp_dir}/results_pilot.csv"
+            self._write_gene_block(genes, tmp_dir, "calib")
+            out = f"{tmp_dir}/results_calib.csv"
             if not Path(out).exists():
-                self._run_glmm_fit(tmp_dir, "pilot", "pilot", out)
-            pilot = pd.read_csv(out)
-            pilot_path.parent.mkdir(parents=True, exist_ok=True)
-            pilot.to_csv(pilot_path, index=False)
+                self._run_glmm_fit(tmp_dir, "calib", "calib", out)
+            calib = pd.read_csv(out)
+            calib_path.parent.mkdir(parents=True, exist_ok=True)
+            calib.to_csv(calib_path, index=False)
 
-        mean_hc = np.array([self.Y_hc[:, self._gene_col[g]].mean() for g in pilot["gene"]])
-        alpha_fit = np.exp(-pilot["disp_coef_0"].to_numpy(dtype=float))
-        ok = pilot["ok"].to_numpy(dtype=bool)
+        mean_hc = np.array([self.Y_hc[:, self._gene_col[g]].mean() for g in calib["gene"]])
+        alpha_fit = np.exp(-calib["disp_coef_0"].to_numpy(dtype=float))
+        ok = calib["ok"].to_numpy(dtype=bool)
         trend = build_trend_from_fits(mean_hc, alpha_fit, ok=ok)
         save_trend(trend, trend_path)
         self.trend_path = trend_path
         self.alpha_fn = load_trend(trend_path)
 
-        self.disp_prior = estimate_slope_prior(pilot_path)
+        self.disp_prior = estimate_slope_prior(calib_path)
         save_disp_prior(self.disp_prior, disp_prior_path)
 
         mom = build_trend(self.Y_hc[:, list(self._gene_col.values())], min_nz=MP["trend_min_nz"])

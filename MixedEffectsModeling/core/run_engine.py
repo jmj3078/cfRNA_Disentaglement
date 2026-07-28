@@ -15,8 +15,8 @@ TMP_DIR = "/tmp/glmm_train"
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=None)
-    ap.add_argument("--pilot-genes", type=int, default=None,
-                    help="smoke test: shrink the EB-prior pilot from its default gene count")
+    ap.add_argument("--calib-genes", type=int, default=None,
+                    help="smoke test: shrink the EB-prior calibration subsample from its default gene count")
     ap.add_argument("--resume", action="store_true",
                     help="resume from an interrupted run's chunked results.csv in "
                          f"{TMP_DIR} instead of starting fresh (only safe against the same code version)")
@@ -38,10 +38,10 @@ def main():
     n_model = sum(1 for r in engine.genes.values() if r.route == "model")
     print(f"HC={engine.X_hc_scaled.shape[0]} genes={len(engine.genes)} nz_a_max={engine.nz_a_max} pool_route={n_pool} model_route={n_model}")
 
-    ran = engine.prepare_hyperparams(trend_path, disp_prior_path, TMP_DIR, args.pilot_genes)
+    ran = engine.prepare_hyperparams(trend_path, disp_prior_path, TMP_DIR, args.calib_genes)
     prior = engine.disp_prior
-    print(f"hyperparams {'from pilot' if ran else 'cached'}: trend -> {trend_path}, prior -> {disp_prior_path}")
-    print(f"disp slope EB prior sd (n_pilot={prior['n_pilot_genes']})")
+    print(f"hyperparams {'from calib' if ran else 'cached'}: trend -> {trend_path}, prior -> {disp_prior_path}")
+    print(f"disp slope EB prior sd (n_calib={prior['n_calib_genes']})")
     for cov, tau in zip(prior["covariates"], prior["tau_slope"]):
         print(f"  tau_slope[{cov}] = {tau:.4f}")
 

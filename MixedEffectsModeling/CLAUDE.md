@@ -20,18 +20,18 @@ v2's `nbi_disp_intercept` (3rd stage) and `nb_fixed` (hard trend-fixed stage) ar
 
 limma/edgeR moment decomposition: `tau^2 = max(0, (1.4826*MAD(phi_hat))^2 - median(SE^2))` (MAD/median, not variance/mean, so a few near-divergent genes can't inflate tau and silently disable shrinkage).
 
-* **Slopes**: `--mode pilot` fits `nbi_full_eb` with no dispersion prior on a stratified gene subsample (`EB_PARAMS`), `tau_k` read off the across-gene slope spread per covariate. Cached to `disp_prior.json`. Measured 0.10-0.36 (v2's blanket 0.05 was too tight).
+* **Slopes**: `--mode calib` fits `nbi_full_eb` with no dispersion prior on a stratified gene subsample (`EB_PARAMS`, `calib_fits.csv`), `tau_k` read off the across-gene slope spread per covariate. Cached to `disp_prior.json`. Measured 0.10-0.36 (v2's blanket 0.05 was too tight).
 * **Intercept**: not penalized during the fit. Squeezed in Python after the full cascade: `log_theta_post = (hat/SE_0^2 + trend/tau_d^2)/(1/SE_0^2 + 1/tau_d^2)`, pooled across both stages for a stable `tau_d`. `SE_0=NaN` -> `SE^2=inf` -> squeeze collapses to the trend exactly. Overwrites `disp_coef[0]`; `log_theta_raw` keeps the pre-squeeze value.
 
 *Known approximation:* mean coefficients / `tau2` are not refit under the squeezed dispersion (not the joint posterior mode) -- same as limma/edgeR, and it's `alpha` entering the RQR that governs Z calibration.
 
 ### 1a-2. Dispersion Trend (`core/dispersion_trend.py:build_trend_from_fits`)
 
-Prior mean for the intercept squeeze AND the variance PCIS is measured against -- both features are gated by this being correct. `build_trend_from_fits`: lowess of `log(alpha_fit)` on `log(mean)` over the pilot's own **covariate-adjusted** dispersions (frac=0.3, it=3 bisquare robustifying iterations). `build_trend` (raw-count MoM, ignores covariates/batch) is kept only as a diagnostic reference -- it conflates true dispersion with covariate-driven mean variance and over-estimates badly at high expression (see math reference for the decomposition).
+Prior mean for the intercept squeeze AND the variance PCIS is measured against -- both features are gated by this being correct. `build_trend_from_fits`: lowess of `log(alpha_fit)` on `log(mean)` over the calibration run's own **covariate-adjusted** dispersions (frac=0.3, it=3 bisquare robustifying iterations). `build_trend` (raw-count MoM, ignores covariates/batch) is kept only as a diagnostic reference -- it conflates true dispersion with covariate-driven mean variance and over-estimates badly at high expression (see math reference for the decomposition).
 
 Batch enters the mean submodel only (`(1|batch__)`), not dispersion -- a fixed batch factor would give HC's 5 singleton batches a free parameter each, deflating exactly the dispersion the trend measures. `score()` never needs batch: `u~N(0,tau^2)` is marginalized by Gauss-Hermite, so unseen batches (CV, LOBO, disease) need no BLUP.
 
-`core/trend_report.py` runs on every pilot, writes `Figures/dispersion_trend.png` + `trend_residuals.csv` -- no trend is ever deployed without its calibration record.
+`core/trend_report.py` runs on every calibration fit, writes `Figures/dispersion_trend.png` + `trend_residuals.csv` -- no trend is ever deployed without its calibration record.
 
 `training_summary.csv` has `tau2_collapsed` (`tau2 < 1e-4`, ~30% of genes) -- the R-side `singular` flag (`pdHess` FALSE) does not catch this.
 
@@ -77,7 +77,7 @@ Poisson first; if Pearson-residual overdispersion ratio exceeds a threshold (e.g
 
 * **Iterative Refinement:** methodology is experimental; expect structural revisions.
 * **Directory Enforcement:**
-  * `/core`: modeling engine logic only. `glmm_helpers.R`(per-gene fit + PCIS outlier removal + pooled-GLM primitives) · `glmm_fit.R`(CLI, `--mode cascade|pilot|fixed_stage`, `--disp-prior`, `--fit-params`) · `eb_shrinkage.py`(EB prior sd + intercept squeeze) · `glmm_fit_pool.R`(pooled-GLM CLI, unused this round) · `dispersion_trend.py`(`build_trend_from_fits` canonical; `build_trend` diagnostic-only) · `trend_report.py`(always-on trend/prior figure) · `marginal_rqr.py`(tau2-marginalized RQR/log-likelihood, Gauss-Hermite) · `model_engine_mixed.py`(`NormativeModelEngineMixed`/`GeneRecordMixed`) · `calibration.py`(per-gene SHASH) · `pcis_null.R`(PCIS empirical-null simulator) · `pcis_calibration.py`(`run_all()` -> `PCIS_Calibration/`: null PCIS rate table + histogram) · `run_engine.py`(entry point: `python core/run_engine.py [--limit N] [--pilot-genes N] [--resume]`, writes `engine_state_mixed/`)
+  * `/core`: modeling engine logic only. `glmm_helpers.R`(per-gene fit + PCIS outlier removal + pooled-GLM primitives) · `glmm_fit.R`(CLI, `--mode cascade|calib|fixed_stage`, `--disp-prior`, `--fit-params`) · `eb_shrinkage.py`(EB prior sd + intercept squeeze) · `glmm_fit_pool.R`(pooled-GLM CLI, unused this round) · `dispersion_trend.py`(`build_trend_from_fits` canonical; `build_trend` diagnostic-only) · `trend_report.py`(always-on trend/prior figure) · `marginal_rqr.py`(tau2-marginalized RQR/log-likelihood, Gauss-Hermite) · `model_engine_mixed.py`(`NormativeModelEngineMixed`/`GeneRecordMixed`) · `calibration.py`(per-gene SHASH) · `pcis_null.R`(PCIS empirical-null simulator) · `pcis_calibration.py`(`run_all()` -> `PCIS_Calibration/`: null PCIS rate table + histogram) · `run_engine.py`(entry point: `python core/run_engine.py [--limit N] [--calib-genes N] [--resume]`, writes `engine_state_mixed/`)
   * `/validation`: large-scale validation/auditing. `cv_engine.py`(5-fold CV, per-`(gene,fold)` logging to `fold_stats.csv` -- written, **not yet executed**)
   * `/_legacy/core_v1`, `/_legacy/validation_v1`: pre-2026-07-25 4-stage engine, reference only -- do not import/modify.
   * **Root (`.ipynb`):** all visualizations/tabular summaries/analytical reviews go in notebooks in the cwd.

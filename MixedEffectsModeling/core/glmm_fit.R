@@ -20,11 +20,11 @@ X <- as.matrix(read.csv(opt$x, row.names = 1))
 Y <- read.csv(opt$y, row.names = 1)
 batch <- read.csv(opt$batch, row.names = 1)[[1]]
 gene_meta <- read.csv(opt$genes)  # columns: gene, [stage] (stage only needed for fixed_stage mode)
-# The trend is itself estimated FROM a pilot run, so pilot mode has none yet:
+# The trend is itself estimated FROM a calibration run, so calib mode has none yet:
 # alpha_of returns NA there, trend_alpha is reported as NA and pcis_outliers
-# no-ops (a pilot exists only to supply hyperparameters, not deployed fits).
+# no-ops (a calibration run exists only to supply hyperparameters, not deployed fits).
 alpha_of <- function(mean_y) NA_real_
-if (opt$mode != "pilot" && nzchar(opt$trend) && file.exists(opt$trend)) {
+if (opt$mode != "calib" && nzchar(opt$trend) && file.exists(opt$trend)) {
   trend <- fromJSON(opt$trend)
   alpha_of <- function(mean_y) {
     lm <- log(max(mean_y, 1e-8))
@@ -51,10 +51,11 @@ PCIS_CUT <- FP$pcis_cut
 MAX_OUTLIER_FRAC <- FP$max_outlier_frac
 
 # EB prior sd for the dispersion SLOPES, one value per covariate, estimated by a
-# --mode pilot run (eb_shrinkage.estimate_slope_prior). NULL in pilot mode and
-# whenever the json is absent, so the pilot fits with no dispersion prior at all.
+# --mode calib run (eb_shrinkage.estimate_slope_prior). NULL in calib mode and
+# whenever the json is absent, so the calibration run itself fits with no
+# dispersion prior at all.
 TAU_SLOPE <- NULL
-if (opt$mode != "pilot" && nzchar(opt$`disp-prior`) && file.exists(opt$`disp-prior`)) {
+if (opt$mode != "calib" && nzchar(opt$`disp-prior`) && file.exists(opt$`disp-prior`)) {
   TAU_SLOPE <- as.numeric(fromJSON(opt$`disp-prior`)$tau_slope)
   stopifnot(length(TAU_SLOPE) == length(safe_names))
 }
@@ -85,7 +86,7 @@ fit_one_cascade <- function(g) {
   }
 }
 
-# pilot: stage nbi_full_eb only, no dispersion prior, used to estimate TAU_SLOPE.
+# calib: stage nbi_full_eb only, no dispersion prior, used to estimate TAU_SLOPE.
 # fixed_stage: refit the stage the full run already chose (CV folds).
 fit_one_single <- function(g, stage) {
   y <- as.numeric(Y[[g]])
@@ -98,7 +99,7 @@ fit_one_single <- function(g, stage) {
 
 worker <- switch(opt$mode,
   cascade = fit_one_cascade,
-  pilot = function(g) fit_one_single(g, "nbi_full_eb"),
+  calib = function(g) fit_one_single(g, "nbi_full_eb"),
   fixed_stage = function(g) fit_one_single(g, gene_meta$stage[gene_meta$gene == g]),
   stop(sprintf("unknown mode '%s'", opt$mode)))
 

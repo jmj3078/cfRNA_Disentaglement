@@ -53,8 +53,8 @@ SPIKE_PARAMS = {
 # Empirical-Bayes dispersion shrinkage + PCIS (Prior-Conditioned Impact Score)
 # outlier removal
 EB_PARAMS = {
-    "pilot_n_genes": 2000,
-    "pilot_n_strata": 10,
+    "calib_n_genes": 2000,
+    "calib_n_strata": 10,
     "tau_floor": 1e-3,
 }
 

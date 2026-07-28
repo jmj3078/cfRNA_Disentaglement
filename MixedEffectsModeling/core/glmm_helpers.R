@@ -120,7 +120,7 @@ pcis_outliers <- function(fit, Xa, y, batch, trend_alpha, cut, max_frac) {
 # now occupies its structural position. The dispersion INTERCEPT is left
 # unpenalized here; it is squeezed toward the lowess trend analytically
 # downstream (eb_shrinkage.squeeze_log_theta). tau_slope is the per-covariate EB
-# prior sd for the dispersion SLOPES, estimated by a --mode pilot run.
+# prior sd for the dispersion SLOPES, estimated by a --mode calib run.
 fit_stage_gene <- function(y, safe_names, X, batch, stage, tau_slope, trend_alpha,
                            beta_explode_thr, tau2_max, disp_intercept_max,
                            pcis_cut, max_outlier_frac) {

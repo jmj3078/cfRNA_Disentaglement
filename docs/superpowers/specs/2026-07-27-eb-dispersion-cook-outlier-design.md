@@ -58,7 +58,7 @@ MAD/median rather than sample variance/mean, because a handful of
 near-divergent genes would otherwise inflate `tau` and silently disable the
 shrinkage.
 
-**Dispersion slopes.** A `--mode pilot` run fits stage `nbi_full_eb` with *no*
+**Dispersion slopes.** A `--mode calib` run fits stage `nbi_full_eb` with *no*
 dispersion prior on a subsample of genes (default 2,000, stratified into 10 HC
 mean-expression deciles, seed 42) and reports coefficients and their SEs. Per
 covariate k:
@@ -69,7 +69,7 @@ tau_k = sqrt(max(0, (1.4826 * MAD_g(gamma_hat_gk))^2 - median_g(SE_gk^2)))
 
 The full run then applies `normal(0, tau_k)` per dispersion slope
 (`class="betad"`, one row per covariate name). Cached to
-`<engine_dir>/disp_prior.json`; the pilot is skipped when that file exists.
+`<engine_dir>/disp_prior.json`; the calibration run is skipped when that file exists.
 
 **Dispersion intercept.** Not penalized during the fit. Instead a one-pass
 analytic squeeze toward the Phase-0 lowess trend is applied in Python after the
@@ -113,7 +113,7 @@ at mu~0.12 rising monotonically to 16.71x at mu~1193 (median log residual -0.834
 -> -2.816, `frac_pos` <= 12.4% in every one of 12 bins).
 
 Fix: `build_trend_from_fits` -- lowess of `log(alpha_fit)` on `log(mean)` over the
-pilot's own covariate-adjusted dispersions, i.e. edgeR/DESeq2's order of
+calibration run's own covariate-adjusted dispersions, i.e. edgeR/DESeq2's order of
 operations. Bias falls to |median residual| <= 0.067 per bin, overall 1.520 ->
 0.008. `build_trend` is retained as an unconditional diagnostic reference only.
 
@@ -125,11 +125,11 @@ Two consequences beyond the trend itself:
 * Cook's distance below is restored at high expression, where a 16x-too-large
   alpha had made it structurally unable to fire.
 
-Ordering: the pilot has no trend yet, so it runs with no dispersion prior and no
-outlier removal (`alpha_of` returns NA in `--mode pilot`, and `cook_outliers`
+Ordering: the calibration run has no trend yet, so it runs with no dispersion prior and no
+outlier removal (`alpha_of` returns NA in `--mode calib`, and `cook_outliers`
 no-ops on a non-finite alpha). Its fits are hyperparameters only, never deployed.
 
-`core/trend_report.py` runs on every pilot and writes
+`core/trend_report.py` runs on every calibration fit and writes
 `Figures/dispersion_trend.png` + `trend_residuals.csv`, so a trend is never
 deployed without its calibration record.
 
@@ -176,9 +176,9 @@ is updated only for the new stage names, the new output columns, passing
 squeeze per fold (with that fold's own `tau_d`) so CV Z-scores reflect the
 deployed model.
 
-*Documented leakage:* `tau_k` comes from a pilot over all HC samples, so it is
+*Documented leakage:* `tau_k` comes from a calibration run over all HC samples, so it is
 shared across CV folds. It is a single hyperparameter pooled over ~20k genes;
-per-fold re-estimation would double the pilot cost for no measurable change.
+per-fold re-estimation would double the calibration cost for no measurable change.
 
 ## Files
 
@@ -189,15 +189,15 @@ per-fold re-estimation would double the pilot cost for no measurable change.
 | `core/dispersion_trend.py` | new `build_trend_from_fits`; `build_trend` demoted to diagnostic |
 | `core/trend_report.py` | new: always-on trend/prior calibration figure + residual CSV |
 | `core/glmm_helpers.R` | 2 stages, `disp_se`, `pcis_outliers` (mixed-model leverage), outlier refit in `fit_stage_gene` |
-| `core/glmm_fit.R` | `--mode pilot`, `--disp-prior`, 2-stage cascade, `disp_se_*`/`n_outliers` columns |
-| `core/model_engine_mixed.py` | `run_pilot`, squeeze in `train`, record fields, summary columns |
-| `core/run_engine.py` | pilot cache step |
+| `core/glmm_fit.R` | `--mode calib`, `--disp-prior`, 2-stage cascade, `disp_se_*`/`n_outliers` columns |
+| `core/model_engine_mixed.py` | `calib_genes`/`prepare_hyperparams`, squeeze in `train`, record fields, summary columns |
+| `core/run_engine.py` | calibration cache step |
 | `validation/cv_engine.py` | stage names, per-fold squeeze, `--disp-prior` |
 | `MixedEffectsModeling/CLAUDE.md` | methodology section rewrite |
 
 ## Verification
 
-1. `--limit` smoke run end-to-end (pilot + cascade + squeeze + save).
+1. `--limit` smoke run end-to-end (calibration + cascade + squeeze + save).
 2. Confirm `disp_prior.json` `tau_k` are materially larger than 0.05 and that
    fitted slope spread widens versus the v2 run.
 3. Confirm the squeeze is a genuine partial shrink (`log_theta_eb` strictly

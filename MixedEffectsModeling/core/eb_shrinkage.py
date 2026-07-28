@@ -6,7 +6,7 @@ scale is recovered by subtracting the error component. MAD/median replace
 variance/mean because a handful of near-divergent genes would otherwise inflate
 tau and silently disable the shrinkage.
 
-  - estimate_slope_prior: tau_k for the dispersion SLOPES, from a no-prior pilot
+  - estimate_slope_prior: tau_k for the dispersion SLOPES, from a no-prior calibration
     run. Fed back into glmmTMB as normal(0, tau_k) per covariate.
   - squeeze_log_theta: precision-weighted posterior mean of the dispersion
     INTERCEPT toward the Phase-0 lowess trend. SE=NaN (unusable sdreport) maps to
@@ -40,18 +40,18 @@ def _tau2(est_spread_var, se, floor):
     return max(base - err, floor ** 2)
 
 
-def estimate_slope_prior(pilot_csv, n_cov=None, floor=None):
-    """tau_k per dispersion slope from a --mode pilot run (no dispersion prior)."""
+def estimate_slope_prior(calib_csv, n_cov=None, floor=None):
+    """tau_k per dispersion slope from a --mode calib run (no dispersion prior)."""
     n_cov = len(config.BIAS_COLUMNS) if n_cov is None else n_cov
     floor = EB["tau_floor"] if floor is None else floor
-    df = pd.read_csv(pilot_csv)
+    df = pd.read_csv(calib_csv)
     df = df[df["ok"].astype(bool) & (df["stage"] == "nbi_full_eb")]
     tau = []
     for k in range(1, n_cov + 1):
         est = df[f"disp_coef_{k}"].to_numpy(dtype=np.float64)
         se = df[f"disp_se_{k}"].to_numpy(dtype=np.float64)
         tau.append(float(np.sqrt(_tau2(robust_var(est), se, floor))))
-    return {"n_pilot_genes": int(len(df)), "covariates": list(config.BIAS_COLUMNS), "tau_slope": tau}
+    return {"n_calib_genes": int(len(df)), "covariates": list(config.BIAS_COLUMNS), "tau_slope": tau}
 
 
 def save_disp_prior(prior, path=None):

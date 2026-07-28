@@ -14,7 +14,7 @@ Scope: 이번 세션에서 최종 확정된 방법론 전체(`MixedEffectsModeli
 두 겹이다:
 
 ```
-Phase 0   pilot 적합(무prior) → covariate-adjusted lowess trend  α_trend(μ)
+Phase 0   calibration 적합(무prior) → covariate-adjusted lowess trend  α_trend(μ)
              │                                              │
              ├─▶ EB slope prior τ_k (Xγ에 사용)               ├─▶ PCIS의 잔차 척도로 사용 (§4.2)
              │                                              └─▶ intercept squeeze의 목표 μ_g (§2.3)
@@ -82,16 +82,16 @@ $$\hat\sigma_{\mathrm{MoM}} \approx \alpha + \tau^2 + \mathrm{CV}^2_X\!\big(\exp
 항의 비중이 발현이 높을수록 급격히 커지므로, raw trend는 고발현 구간에서 특히 심하게 과대추정한다(2.30배 →
 16.71배, 단조 증가).
 
-### 1.3 해법 — pilot 적합의 조건부 dispersion에 lowess
+### 1.3 해법 — calibration 적합의 조건부 dispersion에 lowess
 
-`build_trend_from_fits`는 raw count가 아니라 **pilot 단계에서 이미 공변량으로 조건화하여 적합된**
+`build_trend_from_fits`는 raw count가 아니라 **calibration 단계에서 이미 공변량으로 조건화하여 적합된**
 $\hat\alpha_g$(stage `nbi_full_eb`, dispersion prior 없이) 위에 lowess를 적용한다. 이는 edgeR/DESeq2의
 trended dispersion과 동일한 연산 순서다: 먼저 조건부 모형으로 평균을 설명하게 하고, 남은 dispersion만
 발현수준의 매끄러운 함수로 요약한다.
 
 ### 1.4 LOWESS의 수학 (Cleveland 1979)
 
-목표 함수: $x = \log\bar\mu_g$, $y=\log\hat\alpha_g$ ($G=1{,}736$개 pilot 유전자). 각 평가점 $x_0$마다
+목표 함수: $x = \log\bar\mu_g$, $y=\log\hat\alpha_g$ ($G=1{,}736$개 calibration 유전자). 각 평가점 $x_0$마다
 **국소 선형 가중회귀**를 다시 푼다.
 
 **(a) 이웃 폭과 가중치.** 최근접 이웃 개수 $q = \lfloor \texttt{frac}\cdot G\rfloor$ (frac=0.3),
@@ -121,7 +121,7 @@ $$\delta_i = \Big(1-\big(e_i/(6s)\big)^2\Big)^2_+$$
 유전자)의 영향력을 점진적으로 죽인다 — 이게 여기서 "robust"의 의미이며, 임계값 함수가 아니라 **가중치가
 연속적으로 줄어드는 것**이 핵심이다.
 
-전체 $O(G^2)$이지만 $G=1{,}736$이라 무시할 수준이고, 슬로프 추정 자체(캐시된 pilot 적합)가 병목이다.
+전체 $O(G^2)$이지만 $G=1{,}736$이라 무시할 수준이고, 슬로프 추정 자체(캐시된 calibration 적합)가 병목이다.
 
 ### 1.5 검증
 
@@ -171,7 +171,7 @@ $\to\hat\phi_g$(수축 없음); $SE_g\to\infty$(증거 없음/NaN)면 $\to\mu_g$
 ### 2.3 두 갈래 적용
 
 **(a) Dispersion slopes** ($\gamma_1,\dots,\gamma_{10}$, 공변량별). Prior 평균 $\mu_g=0$(귀무: 공변량이
-dispersion에 영향 없음)으로 두고, `--mode pilot`(dispersion prior 없이 `nbi_full_eb` 적합, HC 평균발현
+dispersion에 영향 없음)으로 두고, `--mode calib`(dispersion prior 없이 `nbi_full_eb` 적합, HC 평균발현
 10분위 층화표집 2,000유전자 목표, 실제 1,736개 수렴)에서 나온 계수 스프레드로 공변량별 $\tau_k$를 추정:
 
 $$\tau_k = \sqrt{\max\big(0,\ (1.4826\,\mathrm{MAD}_g(\hat\gamma_{gk}))^2 - \mathrm{median}_g(SE_{gk}^2)\big)}$$

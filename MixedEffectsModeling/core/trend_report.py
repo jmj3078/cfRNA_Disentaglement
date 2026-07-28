@@ -1,8 +1,8 @@
-"""Always-on diagnostic report for the two pilot-derived hyperparameters: the
-covariate-adjusted dispersion trend and the per-covariate EB slope prior sd.
+"""Always-on diagnostic report for the two calibration-derived hyperparameters:
+the covariate-adjusted dispersion trend and the per-covariate EB slope prior sd.
 
-Written by prepare_hyperparams on every run that executes a pilot, so a trend is
-never deployed without its calibration record. The residual table it saves is the
+Written by prepare_hyperparams on every run that executes a calibration fit, so
+a trend is never deployed without its calibration record. The residual table it saves is the
 acceptance criterion: log(alpha_fit) - log(alpha_trend) must be centred at 0 in
 every expression bin, which the covariate-free MoM trend fails by up to 2.8 log
 units at high expression.
@@ -69,7 +69,7 @@ def trend_report(mean_hc, alpha_fit, trend, disp_prior, out_dir, mom_trend=None,
     fig, ax = plt.subplots(1, 4, figsize=(20, 4.3))
 
     ax[0].scatter(d["mean"], d.alpha_fit, s=2, alpha=0.15, color=COL_PT, rasterized=True,
-                  label=f"pilot fits (n={len(d)})")
+                  label=f"calib fits (n={len(d)})")
     if mom_trend is not None:
         mlm, mls = curve_of(mom_trend)
         ax[0].plot(np.exp(mlm), np.exp(mls), color=COL_REF, lw=2, ls="--",
