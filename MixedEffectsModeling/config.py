@@ -37,8 +37,10 @@ BIAS_COLUMNS = [
 
 STRATIFY_COL = "Batch_ID"
 
-# Pooling cutoff. Set from the nz_a_max=0 run (every gene through the individual cascade)
-NZ_A_MAX = 25
+# Pooling cutoff. Set from the nz_a_max=0 run (every gene through the individual cascade).
+# Raised 25 -> 31 (2026-07-29): CV fold-level convergence (all 5 folds) drops to ~0.6 in the
+# nz 25-30 bin, below the bar the nz_a_max choice is meant to hold.
+NZ_A_MAX = 31
 MIN_HC_BATCH_SIZE = 5
 
 SPIKE_PARAMS = {
