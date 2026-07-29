@@ -11,6 +11,7 @@ CV_OUT="${CV_DIR:-$BASE/CV_Results_mixed}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 LOG="$BASE/Logs/refit_cv_$STAMP.log"
 mkdir -p "$BASE/Logs" "$OUT"
+rm -rf /tmp/cv_glmm_v2   # cv_engine reuses this dir; drop any earlier run's fold inputs
 
 cd "$BASE/.."
 {

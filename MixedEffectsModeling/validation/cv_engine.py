@@ -224,7 +224,7 @@ def main():
 
     e2 = NormativeModelEngineMixed()
     e2.load_hc_data()
-    e2.alpha_fn = load_trend()
+    e2.alpha_fn = load_trend(engine_dir / "dispersion_trend.json")
     n_hc = e2.X_hc_scaled.shape[0]
     folds = list(StratifiedKFold(MP["n_splits"], shuffle=True, random_state=42).split(np.zeros(n_hc), e2.batch))
 
