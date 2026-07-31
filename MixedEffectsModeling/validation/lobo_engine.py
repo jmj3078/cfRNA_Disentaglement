@@ -18,7 +18,7 @@ import MixedEffectsModeling.config as config
 from MixedEffectsModeling.core.dispersion_trend import load_trend
 from MixedEffectsModeling.core.eb_shrinkage import squeeze_log_theta
 from MixedEffectsModeling.core.marginal_rqr import _poisson_rqr, marginal_nb_rqr
-from MixedEffectsModeling.core.ood_filter import MahalanobisFilter
+from MixedEffectsModeling.core.ood_filter import MahalanobisFilter, RangeFilter
 from MixedEffectsModeling.validation.cv_engine import squeeze_fold
 
 MP = config.SPIKE_PARAMS
@@ -200,14 +200,18 @@ def save_batch_result(res, tier, n_dis, out_dir):
     return bdir
 
 
-def compute_ood(data=None, out_dir=config.LOBO_MIXED_DIR, percentile=95):
+def compute_ood(data=None, out_dir=config.LOBO_MIXED_DIR, percentile=95, n_out_thr=2):
     """Inference-only OOD flag for each LOBO_Results_mixed/<batch>/ held-out
     sample -- run_one_batch already refits per batch, so this only needs a
-    MahalanobisFilter fit per batch (on that batch's OWN train-fold HC,
-    excluding the held-out batch, never the held-out batch itself) applied to
-    the already-scored test rows. Writes ood_mask.npy (True=inlier) +
-    ood_distance.npy per batch, same convention as the v1 engine's
-    compute_lobo_ood.py."""
+    filter fit per batch (on that batch's OWN train-fold HC, excluding the
+    held-out batch, never the held-out batch itself) applied to the
+    already-scored test rows. Combines MahalanobisFilter with RangeFilter
+    (>=n_out_thr covariates individually outside HC's p1-p99) -- a quadratic
+    distance alone dilutes several mildly-extreme covariates across the
+    normal ones and misses samples a per-axis count catches (see
+    core/ood_filter.py:RangeFilter, tested 2026-07-31 against 3_disease_scoring.ipynb).
+    Writes ood_mask.npy (True=inlier) + ood_distance.npy per batch, same
+    convention as the v1 engine's compute_lobo_ood.py."""
     data = data or load_full_data()
     name2row = {n: i for i, n in enumerate(data["names"])}
     small = np.array([b in data["small_hc_batches"] for b in data["batch"]])
@@ -219,16 +223,20 @@ def compute_ood(data=None, out_dir=config.LOBO_MIXED_DIR, percentile=95):
         meta = json.loads(meta_path.read_text())
         batch_id = meta["batch_id"]
         tr_idx = np.where(data["is_hc"] & (data["batch"] != batch_id) & ~small)[0]
-        filt = MahalanobisFilter(percentile=percentile).fit(data["X_raw"][tr_idx])
+        X_tr = data["X_raw"][tr_idx]
+        mahal = MahalanobisFilter(percentile=percentile).fit(X_tr)
+        rng_filter = RangeFilter(n_out_thr=n_out_thr).fit(X_tr)
 
         te_rows = np.array([name2row[n] for n in meta["test_names"]])
-        d = filt.distances(data["X_raw"][te_rows])
-        keep = d <= filt.threshold_
+        X_te = data["X_raw"][te_rows]
+        d = mahal.distances(X_te)
+        keep = (d <= mahal.threshold_) & rng_filter.mask(X_te)
 
         np.save(bdir / "ood_mask.npy", keep)
         np.save(bdir / "ood_distance.npy", d)
         meta["ood_percentile"] = percentile
-        meta["ood_threshold"] = filt.threshold_
+        meta["ood_threshold"] = mahal.threshold_
+        meta["ood_n_out_thr"] = n_out_thr
         meta["n_ood_removed"] = int((~keep).sum())
         meta_path.write_text(json.dumps(meta, indent=2, default=str))
         print(f"{batch_id:40s} n_test={len(keep):4d}  removed_OOD={int((~keep).sum()):3d} ({(~keep).mean()*100:.1f}%)")
