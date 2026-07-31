@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 from scipy.optimize import minimize
 from scipy.stats import norm
 
@@ -38,3 +39,27 @@ def fit_shash(x):
     eta, delta = np.exp(log_eta), np.exp(log_delta)
     ok = bool(res.success) and np.isfinite([xi, eta, eps, delta]).all()
     return (xi, eta, eps, delta, ok) if ok else (*IDENTITY, False)
+
+
+def load_shash_params(cv_stats_path):
+    """Per-gene SHASH params fit on in-fold CV Z (core/calibration.py
+    gene_shash_calibration) -- the correction for residual per-gene
+    skew/kurtosis a raw RQR Z carries before it can be treated as N(0,1)."""
+    return pd.read_csv(cv_stats_path).set_index("gene")[
+        ["cv_shash_ok", "cv_shash_xi", "cv_shash_eta", "cv_shash_eps", "cv_shash_delta"]]
+
+
+def shash_correct_col(z, row):
+    if not bool(row["cv_shash_ok"]):
+        return z
+    return shash_transform_to_z(z, row["cv_shash_xi"], row["cv_shash_eta"], row["cv_shash_eps"], row["cv_shash_delta"])
+
+
+def shash_correct_matrix(Z, gene_names, params):
+    """Z: (n_samples, len(gene_names)) raw RQR. Genes missing from params or
+    with cv_shash_ok=False are left uncorrected."""
+    Zc = Z.copy()
+    for j, g in enumerate(gene_names):
+        if g in params.index:
+            Zc[:, j] = shash_correct_col(Z[:, j], params.loc[g])
+    return Zc

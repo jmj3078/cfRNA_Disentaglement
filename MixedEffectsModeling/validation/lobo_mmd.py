@@ -9,46 +9,34 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 import MixedEffectsModeling.config as config
-from MixedEffectsModeling.core.shash import shash_transform_to_z
+from MixedEffectsModeling.core.shash import load_shash_params, shash_correct_col, shash_correct_matrix
 
 LOBO_DIR = config.LOBO_MIXED_DIR
-MMD_SUMMARY_CSV = LOBO_DIR / "mmd_summary.csv"
-MMD_SUMMARY_SHASH_CSV = LOBO_DIR / "mmd_summary_shash.csv"
 
 # Batches below this held-out-HC count give an unstable noise floor -- see
 # memory project_lobo_validation_design.md (same convention as the v1 engine).
 MIN_N_HC = 25
 
 
-def load_shash_params(cv_stats_path=None):
-    """Per-gene SHASH params fit on in-fold CV Z (core/calibration.py
-    gene_shash_calibration) -- the transform that corrects residual per-gene
-    skew/kurtosis before treating a Z-score as N(0,1). Neither the LOBO
-    Z_test.npy nor cv_zscores.pkl carry this correction by default; it must be
-    applied explicitly (see mmd_summary(shash=True))."""
-    path = cv_stats_path or (config.CV_MIXED_DIR / "cv_stats.csv")
-    return pd.read_csv(path).set_index("gene")[
-        ["cv_shash_ok", "cv_shash_xi", "cv_shash_eta", "cv_shash_eps", "cv_shash_delta"]]
+def _cache_path(shash, ood_filter):
+    suffix = ("_shash" if shash else "") + ("_ood" if ood_filter else "")
+    return LOBO_DIR / f"mmd_summary{suffix}.csv"
 
 
-def _shash_correct_col(z, row):
-    if not bool(row["cv_shash_ok"]):
-        return z
-    return shash_transform_to_z(z, row["cv_shash_xi"], row["cv_shash_eta"], row["cv_shash_eps"], row["cv_shash_delta"])
-
-
-def _shash_correct_matrix(Z, gene_names, params):
-    Zc = Z.copy()
-    for j, g in enumerate(gene_names):
-        if g in params.index:
-            Zc[:, j] = _shash_correct_col(Z[:, j], params.loc[g])
-    return Zc
-
-
-def load_batch(batch_dir):
+def load_batch(batch_dir, ood_filter=False):
+    """ood_filter=True drops held-out samples flagged by compute_ood()
+    (lobo_engine.py) as covariate-extrapolating relative to that batch's own
+    train-fold HC -- otherwise a large |Z| can reflect the model being asked
+    to extrapolate, not disease biology."""
     meta = json.load(open(batch_dir / "meta.json"))
     Z = np.load(batch_dir / "Z_test.npy")
     is_hc = np.array(meta["test_is_hc"])
+    if ood_filter:
+        mask_path = batch_dir / "ood_mask.npy"
+        if not mask_path.exists():
+            raise FileNotFoundError(f"{mask_path} missing -- run lobo_engine.compute_ood() first")
+        keep = np.load(mask_path)
+        Z, is_hc = Z[keep], is_hc[keep]
     return meta, Z, is_hc
 
 
@@ -84,7 +72,7 @@ def load_hc_reference_centroid(cv_zscores_path=None, shash_params=None):
     for i, g in enumerate(genes):
         z = np.nan_to_num(d[g], nan=np.nan, posinf=10.0, neginf=-10.0)
         if shash_params is not None and g in shash_params.index:
-            z = _shash_correct_col(z, shash_params.loc[g])
+            z = shash_correct_col(z, shash_params.loc[g])
         centroid[i] = np.nanmean(z)
     return genes, centroid
 
@@ -127,7 +115,7 @@ def _ref_centroid_direction(gene_names, Z, is_hc, hc_genes, hc_centroid):
     return dist[is_hc].mean(), dist[~is_hc].mean()
 
 
-def mmd_summary(min_n_hc=MIN_N_HC, n_perm=1000, max_n_per_group=150, seed=42, shash=False):
+def mmd_summary(min_n_hc=MIN_N_HC, n_perm=1000, max_n_per_group=150, seed=42, shash=False, ood_filter=False):
     """For each Tier-A batch with a stably-estimable held-out-HC noise floor,
     tests whether held-out-HC and held-out-disease Z-vectors come from
     different distributions (MMD^2, RBF kernel over all genes jointly,
@@ -135,19 +123,21 @@ def mmd_summary(min_n_hc=MIN_N_HC, n_perm=1000, max_n_per_group=150, seed=42, sh
     held-out-HC from the in-fold HC reference centroid, or not).
     shash=True applies the per-gene SHASH correction (core/calibration.py,
     fit on in-fold CV Z) to both the LOBO Z and the CV reference centroid
-    before comparing -- neither carries that correction otherwise."""
-    shash_params = load_shash_params() if shash else None
+    before comparing -- neither carries that correction otherwise.
+    ood_filter=True drops held-out samples flagged as covariate-extrapolating
+    (see load_batch); requires lobo_engine.compute_ood() to have been run."""
+    shash_params = load_shash_params(config.CV_MIXED_DIR / "cv_stats.csv") if shash else None
     hc_genes, hc_centroid = load_hc_reference_centroid(shash_params=shash_params)
 
     rows = []
     for b in tier_a_batches(min_n_hc=min_n_hc):
         safe = b.replace(" ", "_")
         bdir = LOBO_DIR / safe
-        meta, Z, is_hc = load_batch(bdir)
+        meta, Z, is_hc = load_batch(bdir, ood_filter=ood_filter)
         Z = np.nan_to_num(Z, nan=0.0, posinf=10.0, neginf=-10.0)
         gene_names = pickle.load(open(bdir / "gene_names.pkl", "rb"))
         if shash:
-            Z = _shash_correct_matrix(Z, gene_names, shash_params)
+            Z = shash_correct_matrix(Z, gene_names, shash_params)
         hc_Zb, dis_Zb = Z[is_hc], Z[~is_hc]
         if len(hc_Zb) < 5 or len(dis_Zb) < 5:
             continue
@@ -163,12 +153,11 @@ def mmd_summary(min_n_hc=MIN_N_HC, n_perm=1000, max_n_per_group=150, seed=42, sh
     return pd.DataFrame(rows).sort_values("n_dis", ascending=False)
 
 
-def mmd_summary_cached(force=False, csv_path=None, shash=False, **kwargs):
-    if csv_path is None:
-        csv_path = MMD_SUMMARY_SHASH_CSV if shash else MMD_SUMMARY_CSV
+def mmd_summary_cached(force=False, csv_path=None, shash=False, ood_filter=False, **kwargs):
+    csv_path = csv_path or _cache_path(shash, ood_filter)
     if not force and os.path.isfile(csv_path):
         return pd.read_csv(csv_path)
-    df = mmd_summary(shash=shash, **kwargs)
+    df = mmd_summary(shash=shash, ood_filter=ood_filter, **kwargs)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(csv_path, index=False)
     return df
