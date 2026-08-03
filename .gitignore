@@ -13,7 +13,7 @@
 *.log
 *.parquet
 *.csv.gz
-
+*.key
 #CLAUDE
 .claude
 */CLAUDE.md

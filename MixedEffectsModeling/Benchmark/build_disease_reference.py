@@ -6,9 +6,11 @@ import urllib.request
 from pathlib import Path
 
 OPEN_TARGETS = "https://api.platform.opentargets.org/api/v4/graphql"
-GWAS_CATALOG = "https://www.ebi.ac.uk/gwas/rest/api"
+MONARCH = "https://api.monarchinitiative.org/v3/api"
+DISGENET = "https://api.disgenet.com/api/v1"
+DISGENET_KEY_PATH = Path(__file__).parent / "disgenet_api.key"
 PAGE_SIZE = 1000
-SUPPLEMENT_MIN_GENES = 100  # below this, top up with GWAS Catalog gene-trait hits
+SUPPLEMENT_MIN_GENES = 100  # below this, top up with DisGeNET curated gene-disease associations
 
 # phenotype (post-OOD sample-level label, MixedEffectsModeling/3_disease_scoring.ipynb) -> Open
 # Targets disease search query. Heterogeneous / undefined-cohort phenotypes map to None
@@ -92,35 +94,35 @@ def http_json(url):
     raise err
 
 
-def gwas_trait_search(query):
-    """findByEfoTrait needs an exact trait-name match. Progressively drop trailing words
-    ("X of undetermined significance" -> "X") until GWAS Catalog's own vocabulary matches."""
-    words = query.split()
-    while words:
-        q = urllib.parse.quote(' '.join(words))
-        hits = http_json(f'{GWAS_CATALOG}/efoTraits/search/findByEfoTrait?trait={q}&page=0&size=1')
-        traits = hits.get('_embedded', {}).get('efoTraits', [])
-        if traits:
-            return traits[0]['shortForm']
-        words = words[:-1]
+def umls_cui(query):
+    """Monarch search on the same free-text query, read off the UMLS xref of the top hit."""
+    hits = http_json(f'{MONARCH}/search?q={urllib.parse.quote(query)}&limit=1')
+    items = hits.get('items', [])
+    if not items:
+        return None
+    for x in items[0].get('xref') or []:
+        if x.startswith('UMLS:'):
+            return x.split(':', 1)[1]
     return None
 
 
-def gwas_supplement_genes(query, exclude):
-    """Free, no-key fallback for OT-sparse diseases: genes reported by GWAS Catalog hits
-    for the matching EFO trait (author-reported genes at each significant locus)."""
-    short_form = gwas_trait_search(query)
-    if short_form is None:
+def disgenet_supplement_genes(query, exclude):
+    """DisGeNET curated gene-disease associations (academic key, CURATED sources only --
+    ORPHANET/CLINVAR/CLINGEN/GENCC/etc, not text-mined or GWAS-inferred). Used sparingly:
+    only called for diseases where Open Targets coverage is already thin."""
+    if not DISGENET_KEY_PATH.exists():
         return None, []
-    assoc = http_json(f'{GWAS_CATALOG}/efoTraits/{short_form}/associations?projection=associationByEfoTrait')
-    genes = set()
-    for a in assoc.get('_embedded', {}).get('associations', []):
-        for loc in a.get('loci', []):
-            for ag in loc.get('authorReportedGenes', []):
-                name = ag.get('geneName')
-                if name and name not in exclude:
-                    genes.add(name)
-    return short_form, sorted(genes)
+    cui = umls_cui(query)
+    if cui is None:
+        return None, []
+    key = DISGENET_KEY_PATH.read_text().strip()
+    req = urllib.request.Request(
+        f'{DISGENET}/gda/summary?disease=UMLS_{cui}&source=CURATED&page_number=0',
+        headers={'Authorization': key, 'Accept': 'application/json'})
+    d = json.loads(urllib.request.urlopen(req, timeout=30).read())
+    genes = sorted({row['symbolOfGene'] for row in d.get('payload', [])
+                    if row['symbolOfGene'] not in exclude})
+    return cui, genes
 
 
 def main():
@@ -141,14 +143,14 @@ def main():
                    'source': 'Open Targets Platform GraphQL v4', 'retrieved': today}
             if len(genes) < SUPPLEMENT_MIN_GENES:
                 have = {g for g, _ in genes}
-                gwas_trait, gwas_genes = gwas_supplement_genes(q, have)
-                if gwas_genes:
-                    rec['supplement'] = {'source': 'GWAS Catalog', 'trait_efo': gwas_trait,
-                                         'genes': gwas_genes}
+                cui, dg_genes = disgenet_supplement_genes(q, have)
+                if dg_genes:
+                    rec['supplement'] = {'source': 'DisGeNET (CURATED)', 'umls_cui': cui,
+                                         'genes': dg_genes}
         json.dump(rec, open(outdir / f'{stem}.json', 'w'), indent=1)
         n_supp = len(rec.get('supplement', {}).get('genes', []))
         print(f'{ph:22s} {str(rec["efo"]):16s} n_genes={len(rec["genes"])}'
-              + (f' +{n_supp} GWAS' if n_supp else ''))
+              + (f' +{n_supp} DisGeNET' if n_supp else ''))
         time.sleep(0.3)
     print(f'\nsaved {len(PHENO_QUERY)} reference files to {outdir}')
 
