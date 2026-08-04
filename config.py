@@ -57,6 +57,12 @@ DESEQ2_GSEA_DIR    = BENCHMARK_DIR / "deseq2_gsea"
 DESEQ2_COV_RESULTS_DIR = BENCHMARK_DIR / "deseq2_covariate_results"
 DESEQ2_COV_GSEA_DIR    = BENCHMARK_DIR / "deseq2_covariate_gsea"
 
+CTRL_COMP_DIR     = ROOT / "EDA" / "Analysis_Results" / "Control_Composition"
+CTRL_COMP_W_DIR   = CTRL_COMP_DIR / "ruvg_W"
+CTRL_COMP_EXPR_DIR = CTRL_COMP_DIR / "expr"
+CTRL_COMP_STAT_DIR = CTRL_COMP_DIR / "tstats"
+CTRL_COMP_FIG_DIR = CTRL_COMP_DIR / "Figures"
+
 CANCER_SCAN_DIR = MODELING_DIR / "Cancer_Signal_Scan"
 CANCER_SCAN_FIG_DIR = CANCER_SCAN_DIR / "Figures"
 
