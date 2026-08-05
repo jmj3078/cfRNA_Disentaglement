@@ -7,6 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 기존 cfRNA 전사체 분석은 주로 정상군과 질병군 간의 집단 수준 비교(Group-wise comparison)에 의존해 왔다. 그러나 생물학적 및 기술적 공변량(Covariates)에 의한 분산이 질병 고유의 신호를 압도하는 경우가 많다. 이로 인해 집단 단위의 일괄적인 공변량 보정은 질병 신호의 소실이나 교란 요인의 잔존을 초래하는 근본적인 한계가 존재한다. 이를 극복하기 위해, 본 연구는 전장 전사체(Whole-Transcriptome) 기반의 대규모 정상군(Healthy Control) 데이터를 활용한 규범적 모델링(Normative Modeling)을 도입한다. 개별 샘플의 공변량을 반영하여 정상 상태의 예상 분포를 추정하고, 이를 통계적 편차(Z-score)로 산출함으로써 교란 요인의 영향 없이 질병 특이적 신호를 정밀하게 정량화.
 
 ### 코드 작성 요령
+- **토큰절약**: 되도록 ponytail 같은 스킬들을 활용해서 효율적이고 짧게 코드를 작성하도록 할 것
 - **간결성**: 최소한의 코드를 지향. 불필요한 추상화·방어 로직 금지.
 - **타입 힌트 금지**: 함수/메서드의 입력 인자 dtype, 반환값 dtype 모두 표기하지 않는다.
 - **정렬용 공백 금지**: 줄·등호를 맞추기 위한 인위적 띄어쓰기 금지 (`a = 1` O / `a   = 1` X).
@@ -22,14 +23,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   from viz_style import apply_style
   apply_style()
   ```
-
-### 실행 명령어
-- **R 의존성**: 엔진 학습(run_model_engine.py의 stage nbi)과 cv_model_engine.py는 R + `gamlss` 패키지 + rpy2 필요(gamlss.r를 source). pool/nb_fixed/intercept 및 모든 scoring(RQR)은 순수 파이썬으로 R 불필요.
-- 엔진 학습 → engine_state/: `python Modeling/run_model_engine.py` (smoke test는 `--limit N`, 절대 실 산출물 덮어쓰지 말 것)
-- 엔진 CV → CV_Results/(cv_stats.csv · cv_zscores.pkl · cv_ppc.pkl): `python Modeling/cv_model_engine.py`
-- LOBO 검증(batch당 nbi 단계 기준 약 15분, 31개 batch 전체 약 6~8시간, 이미 끝난 batch는 meta.json 존재시 자동 skip): `python Modeling/run_lobo_validation.py` → `python Modeling/compute_lobo_ood.py` → `pipeline.lobo_validation.run_all()`(캐시 우선, `_lobo_validation.ipynb`에서 호출)
-- 분석 노트북 실행 순서(모두 thin runner): disease_scoring → gene_enrichment → gsea_heuristic_signatures, 그리고 model_diagnostics(엔진 CV calibration·PPC), lobo_validation(MMD 기반 batch 검증). EDA는 cwd=EDA 가정.
-- 테스트 스위트·린터·빌드 시스템 없음(연구 코드). 검증은 노트북 재실행/스크립트 산출물 확인으로 수행.
+- **대규모 변경** 대규모 코드 리팩토링 진행시 반드시 새로운 branch에서 코드를 고치고 반드시 소규모 테스트를 통해서 동작과 재현을 모두 확인할 것.
 
 ### 신규 분석 노트북 추가 시 체크리스트
 1. `pipeline/` 모듈에 로직 구현 → 노트북은 import+호출만 (thin runner 원칙)
@@ -37,4 +31,4 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 3. `apply_style()` 호출 확인
 
 ### 데이터베이스 참조/논문참조
-skill 중 /paper-lookup, /database-lookup, /scientific-critical-thinking 을 효율적이게 활용하여, 사용자가 결과의 해석을 요청한 경우 반드시 fetching과 skill을 적절히 활용하여 기존 연구결과의 엄격한 검증을 통해 해석을 수행할 것. 반드시 과학적인 근거가 있는 내용만을 보수적으로 제공할 것.
+skill 중 /paper-lookup, /database-lookup, /scientific-critical-thinking 을 효율적이게 활용하여, 사용자가 결과의 해석을 요청한 경우 반드시 fetching과 skill을 적절히 활용하여 기존 연구결과의 엄격한 검증을 통해 해석을 수행할 것. 반드시 과학적인 근거가 있는 내용만을 보수적으로 제공할 것. 교차검증을 위한 문서와 인용 링크를 남겨서 사용자가 직접 결과를 검증할 수 있도록 할 것

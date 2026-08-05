@@ -81,11 +81,17 @@ def load_pathway_library():
 # per-patient/per-pathway mean-Z + per-patient permutation null (see 4_gene_enrichment.ipynb for the
 # statistical rationale: burden-confound-free convergence test). Extraction only -- literature-curated
 # pathway shortlisting and visualization stay manual, phenotype-specific follow-up work.
-def run_phenotype(phenotype, Z, gene_names, meta, universe_syms, sym2idx, col2sym, terms, M):
-    slug = slugify(phenotype)
+def run_phenotype(phenotype, Z, gene_names, meta, universe_syms, sym2idx, col2sym, terms, M,
+                  include_batches=None, label=None):
+    # label lets a phenotype be split into per-study sub-cohorts (own slug/output dir, own
+    # gene_sig/path_sig/Jaccard/Sankey) instead of pooling different studies' technical variance together
+    label = label or phenotype
+    slug = slugify(label)
     # exact match, not stripped -- meta has a separate 'Pancreatic Cancer ' (trailing space, 2 rows)
     # variant; merging it in would silently change the cohort against the existing 72-patient cache
     cohort_mask = (meta['phenotype'] == phenotype) & meta['ood_keep']
+    if include_batches:
+        cohort_mask &= meta['batch'].isin(include_batches)
     idx = np.where(cohort_mask.values)[0]
     n_pat = len(idx)
     if n_pat == 0:
@@ -147,8 +153,58 @@ def run_phenotype(phenotype, Z, gene_names, meta, universe_syms, sym2idx, col2sy
                 open(pdir / 'sig.pkl', 'wb'))
 
     return dict(
-        phenotype=phenotype, n_pat=n_pat,
+        phenotype=label, n_pat=n_pat,
         gene_sig_median=float(np.median(n_gene_sig)), gene_sig_max=int(n_gene_sig.max()),
         path_sig_median=float(np.median(n_path_sig)), path_sig_max=int(n_path_sig.max()),
         n_zero_path_sig=int((n_path_sig == 0).sum()),
     )
+
+
+def strip_reactome_code(name):
+    return name.split(' R-HSA-')[0]
+
+
+# subagent-written literature reviews all use "## Selected pathways" -> "### [N.] Name [-- tier note]"
+# under that heading, but the exact heading format (numbered or not, trailing annotations or not)
+# varied by agent -- keep the raw heading text and let match_pathway_index try several derived forms.
+def parse_selected_pathways(md_path):
+    lines = open(md_path).read().splitlines()
+    names, in_section = [], False
+    for line in lines:
+        if line.strip().startswith('## '):
+            in_section = line.strip().lstrip('#').strip().lower() == 'selected pathways'
+            continue
+        if in_section:
+            m = re.match(r'^###\s*(?:\d+\.\s*)?(.+?)\s*$', line.strip())
+            if m:
+                names.append(m.group(1))
+    return names
+
+
+def match_pathway_index(name, terms):
+    stripped = [strip_reactome_code(t) for t in terms]
+
+    # derive candidate forms: raw heading, text before an em-dash/hyphen tier-note suffix, and any
+    # parenthetical content (agents sometimes wrote "Short Name (Actual Pathway Term)")
+    candidates = [name]
+    candidates.append(re.split(r'\s+[-—]{1,2}\s+', name)[0])
+    paren = re.search(r'\(([^)]+)\)', name)
+    if paren:
+        candidates.append(paren.group(1))
+        candidates.append(re.sub(r'\s*\([^)]+\)', '', name).strip())
+
+    import difflib
+    for cand in candidates:
+        low = cand.lower().strip()
+        if not low:
+            continue
+        for j, t in enumerate(stripped):
+            if t.lower() == low:
+                return j
+        for j, t in enumerate(stripped):
+            if t.lower().startswith(low) or low.startswith(t.lower()):
+                return j
+        close = difflib.get_close_matches(cand, stripped, n=1, cutoff=0.8)
+        if close:
+            return stripped.index(close[0])
+    return None
