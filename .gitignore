@@ -9,6 +9,7 @@
 *.pkl
 *.pt
 *.npy
+*.npz
 *.csv
 *.log
 *.parquet

@@ -15,6 +15,7 @@ THRESHOLD_SWEEP_DIR     = _HERE / "Threshold_Sweep"
 THRESHOLD_SWEEP_FIG_DIR = THRESHOLD_SWEEP_DIR / "Figures"
 PCIS_CAL_DIR            = _HERE / "PCIS_Calibration"
 PCIS_CAL_FIG_DIR        = PCIS_CAL_DIR / "Figures"
+PATHWAY_CONV_DIR        = _HERE / "PathwayConvergence"
 LOG_DIR                 = _HERE / "Logs"
 GLMM_HELPERS_R = _HERE / "core" / "glmm_helpers.R"
 PCIS_NULL_R    = _HERE / "core" / "pcis_null.R"
@@ -71,4 +72,31 @@ FIT_PARAMS = {
     "max_outlier_frac": 0.05,
     "chunk_size": 200,
     "cores": 12,
+}
+
+# Gene- vs pathway-level deviation convergence (4_gene_enrichment.ipynb): patient-level BH-sig
+# genes are heterogeneous, but does the same deviation converge onto shared pathways? Mirrors
+# Wolfers 2018 JAMA Psych / Segal 2023 Nat Neurosci deviation-overlap design (see
+# EDA/normative_modeling_literature.md).
+PATHWAY_CONV_PARAMS = {
+    "gene_sets": ["KEGG_2021_Human", "Reactome_2022"],
+    "min_pathway_size": 5,
+    "n_null_perm": 200,
+    "fdr_q": 0.05,
+    "seed": 42,
+    # Name-based keyword match misses pathways that are translation-dominated by gene COMPOSITION but
+    # unrelated by NAME (Influenza Infection, SLIT/ROBO signaling, Cellular Response To Starvation all
+    # came out >45% ribosomal-protein genes empirically) -- so exclusion is composition-based: any
+    # pathway sharing > ribo_frac_max of its genes with the reference KEGG "Ribosome" set is dropped.
+    # Keyword list stays as a fast belt-and-suspenders for OXPHOS/neurodegeneration, which the
+    # ribosome-composition check does not catch (feedback_gsea_interpretation).
+    "ribo_reference_term": "Ribosome",
+    "ribo_frac_max": 0.15,
+    "max_pathway_size_select": 300,
+    "top_k_pathways": 6,
+    "redundancy_jaccard_max": 0.5,
+    "exclude_keywords": [
+        "oxidative phosphorylation", "electron transport", "respiratory chain",
+        "alzheimer", "parkinson", "huntington", "prion disease", "amyotrophic lateral sclerosis",
+    ],
 }
