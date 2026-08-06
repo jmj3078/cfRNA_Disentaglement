@@ -55,6 +55,13 @@ def load_cohort():
     meta = adata.obs[["Author", config.STRATIFY_COL, "Phenotype_Processed"] + config.BIAS_COLUMNS].copy()
     meta.columns = ["study", "batch", "phenotype"] + [f"cov{i}" for i in range(len(config.BIAS_COLUMNS))]
     meta.index = counts.index
+
+    # disease samples must match the normative pipeline's OOD-filtered cohort
+    # (Z_scores_mixed/sample_meta.csv); HC has no ood_keep entry so it defaults to kept
+    ood = pd.read_csv(config.ROOT / "MixedEffectsModeling" / "Z_scores_mixed" / "sample_meta.csv",
+                      index_col="sample")["ood_keep"]
+    meta["ood_keep"] = meta.index.map(ood).fillna(True)
+
     return counts, meta, adata.var["GeneName"].astype(str)
 
 
@@ -99,6 +106,7 @@ def main():
         if len(hc) < MIN_GROUP:
             continue
         for pheno, mp in m[m["phenotype"] != "Healthy Control"].groupby("phenotype", observed=True):
+            mp = mp[mp["ood_keep"]]
             if len(mp) < MIN_GROUP:
                 continue
             idx = hc.append(mp.index)
