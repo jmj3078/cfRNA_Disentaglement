@@ -104,27 +104,47 @@ def model_route_mask(gene_names):
     return (ts.reindex(gene_names) == 'model').values
 
 
-def normative_gene_sets(sample_meta, gene_names, sym_of, exclude_pool=False):
-    """{phenotype: (union_symbol_set, per_patient_rate_gene_symbols_list)}.
-    per_patient list holds each patient's own significant-symbol set for rate distributions.
+def normative_gene_hits(sample_meta, gene_names, sym_of, q=0.05, Z=None, exclude_pool=False):
+    """{phenotype: [per-patient significant-symbol-set, ...]}, computed directly from
+    Z_disease_shash.npy (SHASH-calibrated, same array PathwayConvergence/3_disease_scoring.ipynb
+    score significance from) for every phenotype with OOD-kept samples -- NOT sourced from
+    PathwayConvergence's sig.pkl, which only covers the ~9 phenotypes that batch script scoped in
+    (missing HIV, ME/CFS, MM, MGUS, Liver Cirrhosis, HIV+TB, CAD_HF+/-, Other Cancer, ICI-*).
+    Raw per-patient sets -- callers build union (K=1) or recurrence (K>=k) gene sets from these
+    via gene_sets_from_hits without recomputing p-values per threshold.
     exclude_pool=True restricts to individually-fitted genes (drops the pooled-GLM rare route)."""
+    from scipy.stats import norm
+    if Z is None:
+        Z = np.load(ZDIR / 'Z_disease_shash.npy')
+    p_all = 2 * norm.sf(np.abs(Z))
     sym_arr = sym_of.reindex(gene_names).values
     col_mask = model_route_mask(gene_names) if exclude_pool else None
-    out_union, out_per_patient = {}, {}
-    for pheno, pdirs in pc_dirs_by_phenotype(sample_meta).items():
-        union = set()
+    out = {}
+    for pheno, sub in sample_meta[sample_meta.ood_keep].groupby('phenotype'):
         per_patient = []
-        for pdir in pdirs:
-            d = pickle.load(open(pdir / 'sig.pkl', 'rb'))
-            for row in d['gene_sig']:
-                if col_mask is not None:
-                    row = row & col_mask
-                syms = {s for s in sym_arr[row] if pd.notna(s)}
-                per_patient.append(syms)
-                union |= syms
-        out_union[pheno] = union
-        out_per_patient[pheno] = per_patient
-    return out_union, out_per_patient
+        for i in sub.index:
+            row = p_all[i]
+            finite = np.isfinite(row)
+            reject = np.zeros(len(row), dtype=bool)
+            reject[finite] = bh_fdr_reject(row[finite], q=q)
+            if col_mask is not None:
+                reject = reject & col_mask
+            per_patient.append({s for s in sym_arr[reject] if pd.notna(s)})
+        out[pheno] = per_patient
+    return out
+
+
+def gene_sets_from_hits(per_patient_hits, K=1):
+    """{phenotype: symbol_set} -- a symbol counts if significant in >=K patients. K=1 is the plain
+    union; K>=3 is the recurrence variant (same convention as normative_pathway_recurrence)."""
+    out = {}
+    for pheno, per_patient in per_patient_hits.items():
+        counts = {}
+        for syms in per_patient:
+            for s in syms:
+                counts[s] = counts.get(s, 0) + 1
+        out[pheno] = {s for s, c in counts.items() if c >= K}
+    return out
 
 
 def gene_venn_sets():
@@ -135,29 +155,9 @@ def gene_venn_sets():
     gene_names = pickle.load(open(ZDIR / 'gene_names.pkl', 'rb'))
     nocov = deseq2_gene_sets('no_covariate', sym_of)
     cov = deseq2_gene_sets('covariate', sym_of)
-    norm_union, _ = normative_gene_sets(sm, gene_names, sym_of)
+    norm_union = gene_sets_from_hits(normative_gene_hits(sm, gene_names, sym_of), K=1)
     return {ph: (nocov[ph], cov[ph], norm_union[ph])
             for ph in sorted(set(nocov) & set(cov) & set(norm_union))}
-
-
-def plot_gene_venn(ncols=3, save=True):
-    from matplotlib_venn import venn3
-    import matplotlib.pyplot as plt
-    sets = gene_venn_sets()
-    n = len(sets)
-    nrows = -(-n // ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 4.5 * nrows))
-    axes = np.atleast_1d(axes).flatten()
-    for ax, (pheno, (a, b, c)) in zip(axes, sets.items()):
-        venn3([a, b, c], set_labels=('DESeq2 no-cov', 'DESeq2 w/cov', 'Normative'), ax=ax)
-        ax.set_title(pheno)
-    for ax in axes[len(sets):]:
-        ax.axis('off')
-    plt.tight_layout()
-    if save:
-        (HERE / 'Figures').mkdir(exist_ok=True)
-        fig.savefig(HERE / 'Figures' / 'venn_gene_benchmarks.png', bbox_inches='tight')
-    return fig
 
 
 def db_hit_row(phenotype, method, sig_set, ref):
@@ -168,61 +168,22 @@ def db_hit_row(phenotype, method, sig_set, ref):
                 has_ot_ref=len(dref) > 0)
 
 
-def plot_db_hit_bars(rates, title, fname, ncols=3, save=True):
-    """One panel per phenotype (equal weight -- no pooled/volume-weighted average, which lets a
-    method with near-zero detections in most phenotypes look artificially strong off one lucky
-    win). Within a panel, one bar per method: an unfilled outline at height n_sig (total
-    detections) with a solid fill at height n_db (DB-hit subset) -- count and rate in one glyph."""
-    import matplotlib.pyplot as plt
-    sub = rates[rates.has_ot_ref].copy()
-    phenos = sorted(sub.phenotype.unique())
-    methods = list(dict.fromkeys(sub.method))
-    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
-    mcolor = {m: colors[i % len(colors)] for i, m in enumerate(methods)}
-
-    nrows = -(-len(phenos) // ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(4.2 * ncols, 4 * nrows))
-    axes = np.atleast_1d(axes).flatten()
-    x = np.arange(len(methods))
-    for ax, pheno in zip(axes, phenos):
-        row = sub[sub.phenotype == pheno].set_index('method')
-        n_sig = row['n_sig'].reindex(methods).fillna(0)
-        n_db = row['n_db'].reindex(methods).fillna(0)
-        for xi, m in enumerate(methods):
-            c = mcolor[m]
-            ax.bar(xi, n_sig[m], width=0.7, facecolor='none', edgecolor=c, linewidth=1.3)
-            ax.bar(xi, n_db[m], width=0.7, facecolor=c, edgecolor='none')
-            if n_sig[m] > 0:
-                ax.text(xi, n_sig[m], f"{n_db[m]:.0f}/{n_sig[m]:.0f}", ha='center', va='bottom', fontsize=7)
-        ax.set_xticks(x)
-        ax.set_xticklabels(methods, rotation=60, ha='right', fontsize=8)
-        ax.set_title(pheno, fontsize=10)
-    for ax in axes[len(phenos):]:
-        ax.axis('off')
-
-    handles = [plt.Rectangle((0, 0), 1, 1, facecolor=mcolor[m], edgecolor=mcolor[m]) for m in methods]
-    fig.legend(handles, methods, loc='lower center', ncol=min(len(methods), 4), bbox_to_anchor=(0.5, -0.03))
-    fig.suptitle(f"{title}\n(outline = total significant, fill = DB-hit subset)")
-    plt.tight_layout(rect=[0, 0, 1, 0.94])
-    if save:
-        (HERE / 'Figures').mkdir(exist_ok=True)
-        fig.savefig(HERE / 'Figures' / fname, bbox_inches='tight')
-    return fig
-
-
-def gene_level_db_hits(save=True, designs=('no_covariate', 'covariate', 'ruvg_k1', 'ruvg_k2', 'ruvg_k3')):
-    """Symmetric gene-level DB-hit table: every DESeq2 design in `designs` + normative_union
-    (with and without rare-gene pooling) + per-patient normative rate distribution."""
+def gene_level_db_hits(save=True, designs=('no_covariate', 'covariate', 'ruvg_k1', 'ruvg_k2', 'ruvg_k3'),
+                       recur_ks=(1, 3)):
+    """Symmetric gene-level DB-hit table: every DESeq2 design in `designs` + normative gene sets at
+    each recurrence threshold in `recur_ks` (K=1 -> normative_union, K=3 -> normative_recur3, same
+    convention as pathway-level) + per-patient normative rate distribution."""
     ref = load_reference()
     sym_of = ensg_to_symbol()
     sm = pd.read_csv(ZDIR / 'sample_meta.csv')
     gene_names = pickle.load(open(ZDIR / 'gene_names.pkl', 'rb'))
 
     design_sets = {d: deseq2_gene_sets(d, sym_of) for d in designs}
-    norm_union, norm_pp = normative_gene_sets(sm, gene_names, sym_of)
-    norm_union_nopool, _ = normative_gene_sets(sm, gene_names, sym_of, exclude_pool=True)
+    Z = np.load(ZDIR / 'Z_disease_shash.npy')
+    hits = normative_gene_hits(sm, gene_names, sym_of, Z=Z)
+    norm_by_k = {K: gene_sets_from_hits(hits, K=K) for K in recur_ks}
 
-    all_phenos = set(norm_union)
+    all_phenos = set(hits)
     for ds in design_sets.values():
         all_phenos |= set(ds)
 
@@ -231,15 +192,15 @@ def gene_level_db_hits(save=True, designs=('no_covariate', 'covariate', 'ruvg_k1
         for design, ds in design_sets.items():
             if pheno in ds:
                 rows.append(db_hit_row(pheno, DESIGN_LABELS[design], ds[pheno], ref))
-        if pheno in norm_union:
-            rows.append(db_hit_row(pheno, 'normative_union', norm_union[pheno], ref))
-        if pheno in norm_union_nopool:
-            rows.append(db_hit_row(pheno, 'normative_union_no_pool', norm_union_nopool[pheno], ref))
+        for K, norm_sets in norm_by_k.items():
+            if pheno in norm_sets:
+                label = 'normative_union' if K == 1 else f'normative_recur{K}'
+                rows.append(db_hit_row(pheno, label, norm_sets[pheno], ref))
 
     rates = pd.DataFrame(rows)
 
     pp_rows = []
-    for pheno, patients in norm_pp.items():
+    for pheno, patients in hits.items():
         for syms in patients:
             r = db_hit_row(pheno, 'normative_persample', syms, ref)
             pp_rows.append(r)
@@ -317,7 +278,23 @@ def reference_pathways(ref_syms, sym2idx, terms, M, q=0.05):
     return {t for t, r in zip(terms, reject) if r}
 
 
-def pathway_level_db_hits(save=True, designs=('no_covariate', 'covariate', 'ruvg_k1', 'ruvg_k2', 'ruvg_k3')):
+def normative_pathway_recurrence(pdirs):
+    """{term: n_patients_hit} pooled across pdirs (a phenotype may span multiple per-study dirs)."""
+    counts = {}
+    for pdir in pdirs:
+        d = pickle.load(open(pdir / 'sig.pkl', 'rb'))
+        hits = d['path_sig'].sum(axis=0)
+        for t, c in zip(d['terms'], hits):
+            counts[t] = counts.get(t, 0) + int(c)
+    return counts
+
+
+def pathway_level_db_hits(save=True, designs=('no_covariate', 'covariate', 'ruvg_k1', 'ruvg_k2', 'ruvg_k3'),
+                          recur_ks=(1, 3)):
+    """recur_ks: normative pathway is 'detected' if significant in >=K patients (K=1 is the plain
+    union -- 'at least one patient', which saturates toward the whole library as n_pat grows since
+    each patient is an independent 5%-FDR test; K=3 requires independent reproduction across
+    patients, closer to what DESeq2's single pooled test is actually being compared against)."""
     ref = load_reference()
     universe_syms, sym2idx, col2sym = load_symbol_vocab(None)
     terms, M = load_pathway_library()
@@ -332,12 +309,11 @@ def pathway_level_db_hits(save=True, designs=('no_covariate', 'covariate', 'ruvg
 
     rows = []
     for pheno, pdirs in pc_map.items():
-        norm_union = set()
-        for pdir in pdirs:
-            d = pickle.load(open(pdir / 'sig.pkl', 'rb'))
-            for row in d['path_sig']:
-                norm_union |= {t for t, s in zip(d['terms'], row) if s}
-        rows.append(db_hit_row(pheno, 'normative_union', norm_union, ref_path))
+        recur = normative_pathway_recurrence(pdirs)
+        for K in recur_ks:
+            label = 'normative_union' if K == 1 else f'normative_recur{K}'
+            detected = {t for t, c in recur.items() if c >= K}
+            rows.append(db_hit_row(pheno, label, detected, ref_path))
 
         for design in designs:
             label = DESIGN_LABELS[design]
