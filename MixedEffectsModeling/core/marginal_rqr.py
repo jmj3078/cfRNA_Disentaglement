@@ -3,6 +3,7 @@ from numpy.polynomial.hermite_e import hermegauss
 from scipy.stats import nbinom, norm, poisson
 
 RQR_EPS = 1e-8
+RQR_EPS_DIRECT = 1e-15  # tau2-collapsed genes skip GH marginalization -> nbinom.cdf tail is precise enough for a tighter bound
 
 
 def _poisson_rqr(y, mu, seed=None):
@@ -26,7 +27,7 @@ def _nb_rqr(y, mu, alpha, seed=None):
     p = np.clip(n / (n + mu), RQR_EPS, 1 - RQR_EPS)
     lo = np.where(y > 0, nbinom.cdf(y - 1, n, p), 0.0)
     hi = nbinom.cdf(y, n, p)
-    lo = np.clip(lo, RQR_EPS, 1 - RQR_EPS); hi = np.clip(hi, RQR_EPS, 1 - RQR_EPS)
+    lo = np.clip(lo, RQR_EPS_DIRECT, 1 - RQR_EPS_DIRECT); hi = np.clip(hi, RQR_EPS_DIRECT, 1 - RQR_EPS_DIRECT)
     rng = np.random.default_rng(seed)
     return norm.ppf(rng.uniform(np.minimum(lo, hi), np.maximum(lo, hi))).astype(np.float32)
 
