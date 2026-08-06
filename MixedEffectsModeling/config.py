@@ -80,15 +80,32 @@ FIT_PARAMS = {
 # Wolfers 2018 JAMA Psych / Segal 2023 Nat Neurosci deviation-overlap design (see
 # EDA/normative_modeling_literature.md).
 PATHWAY_CONV_PARAMS = {
+    # GO_Biological_Process tried and dropped: checked its top-scoring (recur*eff) terms for
+    # Tuberculosis and 24/25 were near-duplicates (Jaccard>=0.3) of an existing KEGG/Reactome term
+    # or too generic (mRNA splicing, transcription regulation, glycolysis, mitosis) to be a disease
+    # story -- GO's fine-grained hierarchy mostly re-slices signal KEGG/Reactome already carry.
     "gene_sets": ["KEGG_2021_Human", "Reactome_2022"],
     "min_pathway_size": 5,
-    "n_null_perm": 200,
+    # 200 -> 800: convergence check (2 phenotypes, 2 independent seeds each) showed cross-seed
+    # reproducibility of per-patient significant-pathway sets was only ~0.75-0.78 Jaccard at 200,
+    # rising to ~0.86-0.89 at 800 (near the ~0.89 ceiling reached at 1600) -- 200 was not reproducible.
+    "n_null_perm": 800,
     "fdr_q": 0.05,
     "seed": 42,
-    # Name-based keyword match misses pathways that are translation-dominated by gene COMPOSITION but
-    # unrelated by NAME (Influenza Infection, SLIT/ROBO signaling, Cellular Response To Starvation all
-    # came out >45% ribosomal-protein genes empirically) -- so exclusion is composition-based: any
-    # pathway sharing > ribo_frac_max of its genes with the reference KEGG "Ribosome" set is dropped.
+    # Blood/cfRNA transcriptomics has a literature-recognized confound here, not just an in-house
+    # observation: Chaussabel et al. 2008 Immunity (PMID 18631455) modular blood-transcriptomics
+    # framework identifies a coordinately-expressed "protein synthesis / ribosomal protein" module
+    # that dominates variance in whole-blood/PBMC data and reflects generic translational activity or
+    # cell-composition shift, not disease-specific biology -- reused for the same purpose in
+    # Rinchai/Chaussabel 2020 (PMID 32736569), Vegh/Chaussabel 2019 (PMID 31253760). Goeman & Buhlmann
+    # 2007 (PMID 17303618) gives the general mechanism: gene sets sharing a highly co-regulated block
+    # are vulnerable to spurious enrichment regardless of the set's nominal biology. Name-based keyword
+    # match alone misses pathways that carry this module by gene COMPOSITION but not by NAME (Influenza
+    # Infection, SLIT/ROBO signaling, Cellular Response To Starvation all came out >45% ribosomal-protein
+    # genes empirically here) -- so exclusion is composition-based: any pathway sharing > ribo_frac_max
+    # of its genes with the reference KEGG "Ribosome" set (as an operational proxy for the Chaussabel
+    # module) is dropped. The KEGG-Ribosome proxy and the 0.15 cutoff are our own operational choices,
+    # not literature-derived -- Chaussabel's framework flags the module qualitatively, no numeric cutoff.
     # Keyword list stays as a fast belt-and-suspenders for OXPHOS/neurodegeneration, which the
     # ribosome-composition check does not catch (feedback_gsea_interpretation).
     "ribo_reference_term": "Ribosome",
