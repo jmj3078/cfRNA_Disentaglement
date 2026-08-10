@@ -76,6 +76,8 @@
 | Wolfers/Segal 영역별 편차 중첩 | 유전자 수준 중첩 낮음 vs pathway 수렴 실험 |
 | ComBat 2단계 비판 | DESeq2 그룹비교 + batch 보정 관행 비판 |
 
-## 확인 필요
+## 원문 확인 완료 (2026-08-10)
 
-Segal 2023 (<7%, 56%)과 Bayer 2022 (90% 분산 손실) 수치는 이전 세션 조사 기록 기반. 논문 인용 전 원문 문장 단위 재확인 필요.
+- Segal 2023 abstract 원문: "affecting the same area in <7% of people with the same diagnosis. However, these deviations were embedded within common functional circuits and networks in up to 56% of cases." 확인.
+- Bayer 2022 원문: "In all two stage harmonization models, predictions were poorly scaled, suffering from a loss of more than 90% of the original variance." + Results: "both models suffered a loss of more than 90% of their original test variance. This is evident in [Fig.] 4 in that the range of the predicted values is less than the range of the true values." 확인. 관련 그림 Fig.4(예측-실측 범위 축소), Fig.5a(MSLL; 2단계 보정 모델은 전 영역에서 훈련평균보다 못함), Fig.5b(예측분산).
+- Wolfers 2018 그림 구성 확인: Fig.2 = 집단평균 편차 지도, Fig.4/Fig.5 = 조현병/양극성 개인 극단편차 overlap 지도. 원문 "only a few brain loci had extreme deviations in more than 2% of the patients."

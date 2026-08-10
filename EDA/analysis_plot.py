@@ -492,6 +492,75 @@ def plot_normalization_partition(df_partition_all, studies, save_path=None):
     plt.show()
 
 
+def plot_normalization_unique_r2_summary(r2_results, phenotype_var="Phenotype_Processed",
+                                          rank_on="EDAseq|RUVg", save_path=None):
+    """Phenotype vs technical-covariate unique R2 across normalization layers.
+
+    Reads the partial-RDA unique-contribution table (layer x study x variable).
+    Left: composition of total unique R2. Right: technical / phenotype fold.
+    Covariates are ordered by their contribution in the corrected layers
+    (`rank_on`), so the ordering is not dominated by depth in the raw layers.
+    """
+    if isinstance(r2_results, str):
+        r2_results = pd.read_csv(r2_results, sep="\t")
+    df = r2_results.groupby("Layer", sort=False).mean(numeric_only=True)
+
+    tech = [c for c in df.columns if c != phenotype_var]
+    rank_rows = df.loc[df.index.str.contains(rank_on)] if rank_on else df
+    order = df.loc[rank_rows.index, tech].mean().sort_values(ascending=False).index.tolist()
+
+    comp = df[[phenotype_var] + order].fillna(0.0)
+    total = comp.sum(axis=1)
+    frac = comp.div(total, axis=0)
+    fold = (total - comp[phenotype_var]) / comp[phenotype_var]
+
+    cols = ["#4E79A7"] + [PALETTE[1:][i % (len(PALETTE) - 1)] for i in range(len(order))]
+    y = np.arange(len(df))[::-1]
+    corrected = df.index.str.contains(rank_on) if rank_on else np.ones(len(df), bool)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 0.44 * len(df) + 3.4),
+                                   gridspec_kw={"width_ratios": [1.6, 1]})
+
+    left = np.zeros(len(df))
+    for col, c in zip(comp.columns, cols):
+        ax1.barh(y, frac[col].values, left=left, color=c, edgecolor="white",
+                 linewidth=0.4, height=0.72, label=col.replace(phenotype_var, "Phenotype"))
+        left += frac[col].values
+    for yi, (p, t) in enumerate(zip(frac[phenotype_var].values, total.values)):
+        ax1.text(p + 0.015, y[yi], f"{p * 100:.1f}%", va="center", fontsize=9,
+                 fontweight="bold", color="#4E79A7",
+                 bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none", alpha=0.85))
+        ax1.text(1.015, y[yi], f"ΣR²={t * 100:.1f}%", va="center", fontsize=8, color="#7A7A7A")
+    ax1.set_yticks(y)
+    ax1.set_yticklabels(df.index)
+    for tick, c in zip(ax1.get_yticklabels(), corrected):
+        tick.set_color("#1F1F1F" if c else "#7A7A7A")
+    ax1.set_xlim(0, 1)
+    ax1.set_xlabel("Share of total unique R² (partial RDA)")
+    ax1.set_title("Phenotype vs technical covariates")
+    ax1.grid(axis="x", linestyle="--", alpha=0.4)
+
+    ax2.barh(y, fold.values, color=["#4E79A7" if c else "#BAB0AC" for c in corrected],
+             edgecolor="black", linewidth=0.4, height=0.72)
+    for yi, v in enumerate(fold.values):
+        ax2.text(v * 1.06, y[yi], f"{v:.0f}×", va="center", fontsize=9)
+    ax2.set_xscale("log")
+    ax2.set_xlim(1, fold.max() * 3)
+    ax2.axvline(1, color="black", linewidth=0.8)
+    ax2.set_yticks(y)
+    ax2.set_yticklabels([])
+    ax2.set_xlabel("Technical / phenotype unique R²  (log scale)")
+    ax2.set_title("Technical variance dominance")
+    ax2.grid(axis="x", linestyle="--", alpha=0.4)
+
+    fig.legend(loc="lower center", ncol=3, bbox_to_anchor=(0.5, -0.2), frameon=False)
+    plt.tight_layout()
+    _save(fig, save_path)
+    plt.show()
+    return pd.DataFrame({"pheno_unique_R2": comp[phenotype_var], "total_unique_R2": total,
+                         "pheno_share": frac[phenotype_var], "fold_technical": fold})
+
+
 def plot_hc_rda_results(sr_unique, r2_all, batch_col, layer, unique_dict, save_path=None):
     """Two-panel HC RDA result: per-variable bar + joint variance partition."""
     stem, ext = (os.path.splitext(save_path) if save_path else (None, ".png"))
