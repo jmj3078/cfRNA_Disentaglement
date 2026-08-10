@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy.stats import mannwhitneyu
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 import MixedEffectsModeling.config as config
@@ -57,26 +58,6 @@ def tier_a_batches(min_n_hc=MIN_N_HC):
     return kept
 
 
-def load_hc_reference_centroid(cv_zscores_path=None, shash_params=None):
-    """Per-gene mean Z from the standard 5-fold engine CV (NOT the LOBO run) --
-    the 'model trained/evaluated under normal conditions' reference point both
-    held-out-HC and disease are compared against. Per-gene arrays in
-    cv_zscores.pkl are ragged (a gene that failed some CV folds has fewer
-    entries than one that passed all 5), so this only ever takes a per-gene
-    mean -- never stacks them into a shared per-sample matrix.
-    shash_params, if given, SHASH-corrects each gene's Z before averaging."""
-    path = cv_zscores_path or (config.CV_MIXED_DIR / "cv_zscores.pkl")
-    d = pickle.load(open(path, "rb"))
-    genes = list(d.keys())
-    centroid = np.empty(len(genes))
-    for i, g in enumerate(genes):
-        z = np.nan_to_num(d[g], nan=np.nan, posinf=10.0, neginf=-10.0)
-        if shash_params is not None and g in shash_params.index:
-            z = shash_correct_col(z, shash_params.loc[g])
-        centroid[i] = np.nanmean(z)
-    return genes, centroid
-
-
 def _mmd2_from_kernel(K, n):
     Kxx, Kyy, Kxy = K[:n, :n], K[n:, n:], K[:n, n:]
     m = K.shape[0] - n
@@ -104,15 +85,24 @@ def _mmd_permutation_test(X, Y, n_perm=1000, seed=42):
     return obs, p
 
 
-def _ref_centroid_direction(gene_names, Z, is_hc, hc_genes, hc_centroid):
-    gene_index = {g: i for i, g in enumerate(hc_genes)}
-    keep_cols = [i for i, g in enumerate(gene_names) if g in gene_index]
-    cols = [gene_index[gene_names[i]] for i in keep_cols]
-    order = np.argsort(cols)
-    Zsub = np.nan_to_num(Z[:, keep_cols][:, order], nan=0.0, posinf=10.0, neginf=-10.0)
-    ref = hc_centroid[np.sort(cols)]
-    dist = np.sqrt(((Zsub - ref) ** 2).sum(axis=1))
-    return dist[is_hc].mean(), dist[~is_hc].mean()
+def _ref_centroid_direction(Z, is_hc):
+    """Reference centroid built ONLY from this batch's own LOBO-scored held-out HC
+    (a model that never trained on this batch) -- not the earlier CV-based centroid,
+    which leaked information because CV's StratifiedKFold splits within every batch
+    rather than excluding one, so this batch's own samples entered 4/5 of its
+    training folds. Each HC sample is compared to a leave-one-out centroid of the
+    OTHER held-out HC (excluding itself), or it would be pulled toward its own
+    position and its distance would be spuriously shrunk; disease samples never
+    contribute to the centroid, so they compare against the full HC mean."""
+    hc_Z = Z[is_hc]
+    n_hc = len(hc_Z)
+    hc_sum = hc_Z.sum(axis=0)
+    loo_centroid = (hc_sum[None, :] - hc_Z) / (n_hc - 1)
+    d_hc = np.linalg.norm(hc_Z - loo_centroid, axis=1)
+    full_centroid = hc_sum / n_hc
+    d_dis = np.linalg.norm(Z[~is_hc] - full_centroid[None, :], axis=1)
+    _, p_direction = mannwhitneyu(d_dis, d_hc, alternative="greater")
+    return d_hc.mean(), d_dis.mean(), float(p_direction)
 
 
 def mmd_summary(min_n_hc=MIN_N_HC, n_perm=1000, max_n_per_group=150, seed=42, shash=False, ood_filter=False):
@@ -120,14 +110,16 @@ def mmd_summary(min_n_hc=MIN_N_HC, n_perm=1000, max_n_per_group=150, seed=42, sh
     tests whether held-out-HC and held-out-disease Z-vectors come from
     different distributions (MMD^2, RBF kernel over all genes jointly,
     permutation p-value), then reports direction (disease farther than
-    held-out-HC from the in-fold HC reference centroid, or not).
+    held-out-HC from a reference centroid, or not). The reference centroid is
+    built ONLY from this batch's own held-out HC (see _ref_centroid_direction)
+    -- an earlier version used a centroid pooled from the standard 5-fold CV,
+    which leaked this batch's own samples back in (CV splits within every
+    batch rather than excluding one) and diluted the noise-floor estimate.
     shash=True applies the per-gene SHASH correction (core/calibration.py,
-    fit on in-fold CV Z) to both the LOBO Z and the CV reference centroid
-    before comparing -- neither carries that correction otherwise.
+    fit on in-fold CV Z) to the LOBO Z before comparing.
     ood_filter=True drops held-out samples flagged as covariate-extrapolating
     (see load_batch); requires lobo_engine.compute_ood() to have been run."""
     shash_params = load_shash_params(config.CV_MIXED_DIR / "cv_stats.csv") if shash else None
-    hc_genes, hc_centroid = load_hc_reference_centroid(shash_params=shash_params)
 
     rows = []
     for b in tier_a_batches(min_n_hc=min_n_hc):
@@ -147,9 +139,10 @@ def mmd_summary(min_n_hc=MIN_N_HC, n_perm=1000, max_n_per_group=150, seed=42, sh
         dis_s = dis_Zb if len(dis_Zb) <= max_n_per_group else dis_Zb[rng.choice(len(dis_Zb), max_n_per_group, replace=False)]
         mmd2, p = _mmd_permutation_test(hc_s, dis_s, n_perm=n_perm, seed=seed)
 
-        hc_dist, dis_dist = _ref_centroid_direction(gene_names, Z, is_hc, hc_genes, hc_centroid)
+        hc_dist, dis_dist, p_direction = _ref_centroid_direction(Z, is_hc)
         rows.append(dict(batch=b, n_hc=len(hc_Zb), n_dis=len(dis_Zb), mmd2=mmd2, perm_p=p,
-                         hc_ref_dist=hc_dist, dis_ref_dist=dis_dist, disease_farther=dis_dist > hc_dist))
+                         hc_ref_dist=hc_dist, dis_ref_dist=dis_dist, disease_farther=dis_dist > hc_dist,
+                         p_direction=p_direction))
     return pd.DataFrame(rows).sort_values("n_dis", ascending=False)
 
 
