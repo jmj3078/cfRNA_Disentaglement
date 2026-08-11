@@ -29,6 +29,11 @@ def _cache_path(shash, ood_filter):
     return LOBO_DIR / f"mmd_summary{suffix}.csv"
 
 
+def _raw_cache_path(shash, ood_filter):
+    suffix = ("_shash" if shash else "") + ("_ood" if ood_filter else "")
+    return LOBO_DIR / f"mmd_raw{suffix}.pkl"
+
+
 def load_batch(batch_dir, ood_filter=False):
     """ood_filter=True drops held-out samples flagged by compute_ood()
     (lobo_engine.py) as covariate-extrapolating relative to that batch's own
@@ -161,7 +166,7 @@ def _mmd_permutation_test(X, Y, n_perm=1000, seed=42):
         idx = rng.permutation(len(pooled))
         perm_stats[i] = _mmd2_from_kernel(K[np.ix_(idx, idx)], n)
     p = (1 + (perm_stats >= obs).sum()) / (1 + n_perm)
-    return obs, p
+    return obs, p, perm_stats
 
 
 def _ref_centroid_direction(Z, is_hc):
@@ -198,11 +203,11 @@ def _ref_centroid_direction(Z, is_hc):
 
     d_hc, d_dis = np.sqrt(d2_hc), np.sqrt(d2_dis)
     _, p_direction = mannwhitneyu(d_dis, d_hc, alternative="greater")
-    return d_hc.mean(), d_dis.mean(), float(p_direction)
+    return d_hc, d_dis, float(p_direction)
 
 
 def mmd_summary(min_n_hc=MIN_N_HC, n_perm=1000, max_n_per_group=150, seed=42, shash=False, ood_filter=False,
-                force_shash=False):
+                force_shash=False, return_raw=False):
     """For each Tier-A batch with a stably-estimable held-out-HC noise floor,
     tests whether held-out-HC and held-out-disease Z-vectors come from
     different distributions (MMD^2, RBF kernel over all genes jointly,
@@ -220,7 +225,7 @@ def mmd_summary(min_n_hc=MIN_N_HC, n_perm=1000, max_n_per_group=150, seed=42, sh
     (see load_batch); requires lobo_engine.compute_ood() to have been run."""
     loaded = _load_all_batches_hc() if shash else None
 
-    rows = []
+    rows, raw = [], {}
     for b in tier_a_batches(min_n_hc=min_n_hc):
         safe = b.replace(" ", "_")
         bdir = LOBO_DIR / safe
@@ -237,13 +242,18 @@ def mmd_summary(min_n_hc=MIN_N_HC, n_perm=1000, max_n_per_group=150, seed=42, sh
         rng = np.random.default_rng(seed)
         hc_s = hc_Zb if len(hc_Zb) <= max_n_per_group else hc_Zb[rng.choice(len(hc_Zb), max_n_per_group, replace=False)]
         dis_s = dis_Zb if len(dis_Zb) <= max_n_per_group else dis_Zb[rng.choice(len(dis_Zb), max_n_per_group, replace=False)]
-        mmd2, p = _mmd_permutation_test(hc_s, dis_s, n_perm=n_perm, seed=seed)
+        mmd2, p, mmd2_null = _mmd_permutation_test(hc_s, dis_s, n_perm=n_perm, seed=seed)
 
-        hc_dist, dis_dist, p_direction = _ref_centroid_direction(Z, is_hc)
+        d_hc, d_dis, p_direction = _ref_centroid_direction(Z, is_hc)
+        hc_dist, dis_dist = float(d_hc.mean()), float(d_dis.mean())
         rows.append(dict(batch=b, n_hc=len(hc_Zb), n_dis=len(dis_Zb), mmd2=mmd2, perm_p=p,
                          hc_ref_dist=hc_dist, dis_ref_dist=dis_dist, disease_farther=dis_dist > hc_dist,
                          p_direction=p_direction))
-    return pd.DataFrame(rows).sort_values("n_dis", ascending=False)
+        if return_raw:
+            raw[b] = dict(d_hc=d_hc, d_dis=d_dis, mmd2_obs=mmd2, mmd2_null=mmd2_null)
+
+    df = pd.DataFrame(rows).sort_values("n_dis", ascending=False)
+    return (df, raw) if return_raw else df
 
 
 def mmd_summary_cached(force=False, csv_path=None, shash=False, ood_filter=False, **kwargs):
@@ -254,3 +264,18 @@ def mmd_summary_cached(force=False, csv_path=None, shash=False, ood_filter=False
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(csv_path, index=False)
     return df
+
+
+def mmd_raw_cached(force=False, pkl_path=None, shash=False, ood_filter=False, **kwargs):
+    """Per-batch raw distributions behind mmd_summary's means: d_hc/d_dis (kernel-embedding
+    distance per sample) and mmd2_null (the permutation draws behind perm_p) -- for plotting
+    the actual distributions instead of just the summary points."""
+    pkl_path = pkl_path or _raw_cache_path(shash, ood_filter)
+    if not force and os.path.isfile(pkl_path):
+        with open(pkl_path, "rb") as f:
+            return pickle.load(f)
+    _, raw = mmd_summary(shash=shash, ood_filter=ood_filter, return_raw=True, **kwargs)
+    pkl_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(pkl_path, "wb") as f:
+        pickle.dump(raw, f)
+    return raw
