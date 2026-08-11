@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy.spatial.distance import cdist, pdist, squareform
 from scipy.stats import mannwhitneyu
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
@@ -58,6 +59,12 @@ def tier_a_batches(min_n_hc=MIN_N_HC):
     return kept
 
 
+def _median_heuristic_gamma(pooled):
+    d2 = squareform(pdist(pooled, metric="sqeuclidean"))
+    med = np.median(d2[d2 > 0])
+    return (1.0 / med if med > 0 else 1.0), d2
+
+
 def _mmd2_from_kernel(K, n):
     Kxx, Kyy, Kxy = K[:n, :n], K[n:, n:], K[:n, n:]
     m = K.shape[0] - n
@@ -67,12 +74,9 @@ def _mmd2_from_kernel(K, n):
 
 
 def _mmd_permutation_test(X, Y, n_perm=1000, seed=42):
-    from scipy.spatial.distance import pdist, squareform
     pooled = np.vstack([X, Y])
     n = len(X)
-    d2 = squareform(pdist(pooled, metric="sqeuclidean"))
-    med = np.median(d2[d2 > 0])
-    gamma = 1.0 / med if med > 0 else 1.0
+    gamma, d2 = _median_heuristic_gamma(pooled)
     K = np.exp(-gamma * d2)
 
     obs = _mmd2_from_kernel(K, n)
@@ -86,21 +90,36 @@ def _mmd_permutation_test(X, Y, n_perm=1000, seed=42):
 
 
 def _ref_centroid_direction(Z, is_hc):
-    """Reference centroid built ONLY from this batch's own LOBO-scored held-out HC
-    (a model that never trained on this batch) -- not the earlier CV-based centroid,
-    which leaked information because CV's StratifiedKFold splits within every batch
-    rather than excluding one, so this batch's own samples entered 4/5 of its
-    training folds. Each HC sample is compared to a leave-one-out centroid of the
-    OTHER held-out HC (excluding itself), or it would be pulled toward its own
-    position and its distance would be spuriously shrunk; disease samples never
-    contribute to the centroid, so they compare against the full HC mean."""
-    hc_Z = Z[is_hc]
+    """Kernel-embedding distance to the held-out-HC mean embedding, in the SAME
+    RKHS (same RBF kernel, same per-batch median-heuristic gamma) as the MMD
+    test above -- not a raw Euclidean distance in gene space, which collapses
+    19,804 genes with equal, uncorrelated weight and is only a Euclidean cousin
+    of the mean|Z|/chi2 statistics already rejected for exactly that reason.
+    The reference is built ONLY from this batch's own LOBO-scored held-out HC
+    (a model that never trained on this batch), never from CV (CV's
+    StratifiedKFold splits within every batch rather than excluding one, so it
+    would leak this batch's own samples back into the reference). Each HC
+    sample compares to the mean EMBEDDING of the OTHER held-out HC (leave-one-out,
+    or it would be pulled toward its own position and its distance spuriously
+    shrunk); disease samples never contribute to the reference, so they compare
+    against the full HC mean embedding. Squared distance to a kernel mean
+    embedding has a closed form in terms of the Gram matrix alone --
+    ||phi(x) - mean_i phi(h_i)||^2 = k(x,x) - (2/n)sum_i k(x,h_i) + (1/n^2)sum_ij k(h_i,h_j)."""
+    hc_Z, dis_Z = Z[is_hc], Z[~is_hc]
     n_hc = len(hc_Z)
-    hc_sum = hc_Z.sum(axis=0)
-    loo_centroid = (hc_sum[None, :] - hc_Z) / (n_hc - 1)
-    d_hc = np.linalg.norm(hc_Z - loo_centroid, axis=1)
-    full_centroid = hc_sum / n_hc
-    d_dis = np.linalg.norm(Z[~is_hc] - full_centroid[None, :], axis=1)
+    gamma, _ = _median_heuristic_gamma(np.vstack([hc_Z, dis_Z]))
+    Khh = np.exp(-gamma * squareform(pdist(hc_Z, metric="sqeuclidean")))
+    np.fill_diagonal(Khh, 1.0)
+    Kdh = np.exp(-gamma * cdist(dis_Z, hc_Z, metric="sqeuclidean"))
+
+    hc_row_sum = Khh.sum(axis=1) - 1.0  # sum_{k!=i} k(h_i,h_k), k(x,x)=1 excluded
+    hc_total = Khh.sum() - n_hc         # sum_{k!=l} k(h_k,h_l) over ALL HC
+    n = n_hc - 1
+    rest_total = hc_total - 2 * hc_row_sum  # same sum with row/col i removed
+    d2_hc = np.clip(1.0 - (2.0 / n) * hc_row_sum + rest_total / n**2, 0, None)
+    d2_dis = np.clip(1.0 - (2.0 / n_hc) * Kdh.sum(axis=1) + hc_total / n_hc**2, 0, None)
+
+    d_hc, d_dis = np.sqrt(d2_hc), np.sqrt(d2_dis)
     _, p_direction = mannwhitneyu(d_dis, d_hc, alternative="greater")
     return d_hc.mean(), d_dis.mean(), float(p_direction)
 
