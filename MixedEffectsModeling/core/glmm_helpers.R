@@ -23,9 +23,9 @@ is_converged <- function(fit, beta_explode_thr, tau2_max, disp_intercept_max) {
   return(list(ok = FALSE, singular = NA, tau2 = tau2))
 }
 
-  # Standard errors of the dispersion fixed effects. NA when sdreport is unusable
-  # -- the downstream EB squeeze reads NA as SE^2=inf and returns exactly the
-  # lowess trend value, recovering v2's hard-fixed dispersion as a limiting case.
+# Standard errors of the dispersion fixed effects. NA when sdreport is unusable
+# -- the downstream EB squeeze reads NA as SE^2=inf and returns exactly the
+# lowess trend value, recovering v2's hard-fixed dispersion as a limiting case.
 disp_se <- function(fit, ncoef) {
   V <- tryCatch(vcov(fit, full = TRUE), error = function(e) NULL, warning = function(w) NULL)
   if (is.null(V)) return(rep(NA_real_, ncoef))
@@ -34,43 +34,43 @@ disp_se <- function(fit, ncoef) {
   s <- suppressWarnings(sqrt(diag(V))[idx])
   ifelse(is.finite(s), s, NA_real_)
 }
-  # PCIS -- Prior-Conditioned Impact Score. Cook-shaped but deliberately NOT Cook's
-  # distance, and named apart from it so the difference cannot be lost. Both of its
-  # departures are prior-conditioned: the variance is conditioned on the lowess
-  # trend prior, and the leverage on the prior-penalised mixed design.
 
-  #   w_i   = mu_i / (1 + alpha_trend * mu_i)          NB2 log-link IRLS weight
-  #   M     = [Xf Z],  P = blkdiag(0_p, I/tau^2)       fixed design + batch design
-  #   H     = W^1/2 M (M'WM + P)^-1 M' W^1/2
-  #   p_eff = tr(H)
-  #   PCIS_i= r_i^2 / p_eff * h_ii / (1 - h_ii)^2,  r_i = (y_i-mu_i)/sqrt(mu_i+alpha_trend*mu_i^2)
-
-  # Two deliberate departures from Cook's distance, both measured:
-
-  # 1. The variance uses the lowess TREND dispersion, not the gene's own fitted
-  #   one. With a freely estimated dispersion an outlier masks itself: three 20x
-  #   outliers on a synthetic near-Poisson gene inflated alpha 0.004 -> 0.147
-  #   (36x), dropping their statistic from 4.5-9.4 to 0.6-1.1 -- below threshold,
-  #   so nothing was flagged at ANY outlier magnitude. This is what breaks the
-  #   one-step deletion approximation, so PCIS is an influence heuristic, not an
-  #   estimate of the parameter shift under deletion.
-  # 2. The leverage includes the batch design Z under a ridge penalty 1/tau^2
-  #   (Hodges & Sargent effective df), because mu already contains the BLUP: a
-  #   fixed-effect-only hat matrix mixes two different models inside one
-  #   statistic. Measured effect: p_eff 18.4 vs p 11 (40% of the model's effective
-  #   complexity was being ignored) and singleton-batch leverage 0.017 -> 0.165
-  #   (10x). tau2 -> 0 sends the penalty to infinity, so p_eff -> p automatically.
-
-  # PCIS has no F reference distribution (see point 1 above), so the cut is a
-  # fixed constant read off an empirical null (see PCIS_Calibration/README.md):
-  # 19,158 genes x 693 observations regenerated from each gene's own fitted
-  # (beta, gamma, tau^2) and refit under the same stage/prior. cut=2.28 targets
-  # a population-level per-observation false-alarm rate of 1e-4, just above the
-  # point where null-driven removals cross below the observed real removal rate.
-  # Observations are dropped rather than replaced by a trimmed mean, which would
-  # fabricate counts and bias dispersion downward. Returns indices ordered by
-  # decreasing influence.
-
+# PCIS -- Prior-Conditioned Impact Score. Cook-shaped but deliberately NOT Cook's
+# distance, and named apart from it so the difference cannot be lost. Both of its
+# departures are prior-conditioned: the variance is conditioned on the lowess
+# trend prior, and the leverage on the prior-penalised mixed design.
+#
+#   w_i   = mu_i / (1 + alpha_trend * mu_i)          NB2 log-link IRLS weight
+#   M     = [Xf Z],  P = blkdiag(0_p, I/tau^2)       fixed design + batch design
+#   H     = W^1/2 M (M'WM + P)^-1 M' W^1/2
+#   p_eff = tr(H)
+#   PCIS_i= r_i^2 / p_eff * h_ii / (1 - h_ii)^2,  r_i = (y_i-mu_i)/sqrt(mu_i+alpha_trend*mu_i^2)
+#
+# Two deliberate departures from Cook's distance, both measured:
+#
+# 1. The variance uses the lowess TREND dispersion, not the gene's own fitted
+#    one. With a freely estimated dispersion an outlier masks itself: three 20x
+#    outliers on a synthetic near-Poisson gene inflated alpha 0.004 -> 0.147
+#    (36x), dropping their statistic from 4.5-9.4 to 0.6-1.1 -- below threshold,
+#    so nothing was flagged at ANY outlier magnitude. This is what breaks the
+#    one-step deletion approximation, so PCIS is an influence heuristic, not an
+#    estimate of the parameter shift under deletion.
+# 2. The leverage includes the batch design Z under a ridge penalty 1/tau^2
+#    (Hodges & Sargent effective df), because mu already contains the BLUP: a
+#    fixed-effect-only hat matrix mixes two different models inside one
+#    statistic. Measured effect: p_eff 18.4 vs p 11 (40% of the model's effective
+#    complexity was being ignored) and singleton-batch leverage 0.017 -> 0.165
+#    (10x). tau2 -> 0 sends the penalty to infinity, so p_eff -> p automatically.
+#
+# PCIS has no F reference distribution (see point 1 above), so the cut is a
+# fixed constant read off an empirical null (see PCIS_Calibration/README.md):
+# 19,158 genes x 693 observations regenerated from each gene's own fitted
+# (beta, gamma, tau^2) and refit under the same stage/prior. cut=2.28 targets
+# a population-level per-observation false-alarm rate of 1e-4, just above the
+# point where null-driven removals cross below the observed real removal rate.
+# Observations are dropped rather than replaced by a trimmed mean, which would
+# fabricate counts and bias dispersion downward. Returns indices ordered by
+# decreasing influence.
 pcis_outliers <- function(fit, Xa, y, batch, trend_alpha, cut, max_frac) {
   p <- ncol(Xa); n <- length(y)
   if (n - p < 4) return(integer(0))
@@ -107,15 +107,14 @@ pcis_outliers <- function(fit, Xa, y, batch, trend_alpha, cut, max_frac) {
   over[order(-PCIS[over])][seq_len(n_keep)]
 }
 
-  # Fits ONE stage for ONE gene. Caller (glmm_fit.R) drives the demotion order.
-  # v3: stages are "nbi_full_eb" (dispersion regressed on covariates) and "nbi_intercept_eb"
-  # (dispersion intercept only). "nbi_disp_intercept" is gone -- with a
-  # properly-scaled slope prior it was no longer a distinct model, and "nbi_intercept_eb"
-  # now occupies its structural position. The dispersion INTERCEPT is left
-  # unpenalized here; it is squeezed toward the lowess trend analytically
-  # downstream (eb_shrinkage.squeeze_log_theta). tau_slope is the per-covariate EB
-  # prior sd for the dispersion SLOPES, estimated by a --mode calib run.
-  
+# Fits ONE stage for ONE gene. Caller (glmm_fit.R) drives the demotion order.
+# v3: stages are "nbi_full_eb" (dispersion regressed on covariates) and "nbi_intercept_eb"
+# (dispersion intercept only). "nbi_disp_intercept" is gone -- with a
+# properly-scaled slope prior it was no longer a distinct model, and "nbi_intercept_eb"
+# now occupies its structural position. The dispersion INTERCEPT is left
+# unpenalized here; it is squeezed toward the lowess trend analytically
+# downstream (eb_shrinkage.squeeze_log_theta). tau_slope is the per-covariate EB
+# prior sd for the dispersion SLOPES, estimated by a --mode calib run.
 fit_stage_gene <- function(y, safe_names, X, batch, stage, tau_slope, trend_alpha,
                            beta_explode_thr, tau2_max, disp_intercept_max,
                            pcis_cut, max_outlier_frac) {
