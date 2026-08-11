@@ -17,6 +17,7 @@
 *.key
 #CLAUDE
 .claude
+CLAUDE.md
 */CLAUDE.md
 /docs/*
 _external/
