@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import StratifiedKFold
+from sklearn.preprocessing import StandardScaler
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 import MixedEffectsModeling.config as config
@@ -47,7 +48,8 @@ def cv_model_route(e2, model_genes, stage_of, folds, tmp, disp_prior_path=None):
         return {}, {}, []
     rows, fold_stat_rows = [], []
     for fi, (tr, te) in enumerate(folds):
-        pd.DataFrame(e2.X_hc_scaled[tr], columns=config.BIAS_COLUMNS).to_csv(f"{tmp}/X_{fi}.csv.gz")
+        scaler = StandardScaler().fit(e2.X_hc_raw[tr])
+        pd.DataFrame(scaler.transform(e2.X_hc_raw[tr]), columns=config.BIAS_COLUMNS).to_csv(f"{tmp}/X_{fi}.csv.gz")
         Y_tr = e2.Y_hc[tr][:, [e2._gene_col[g] for g in model_genes]]
         pd.DataFrame(Y_tr, columns=model_genes).to_csv(f"{tmp}/Y_{fi}.csv.gz")
         pd.DataFrame({"Batch_ID": e2.batch[tr]}).to_csv(f"{tmp}/batch_{fi}.csv.gz")
@@ -66,7 +68,7 @@ def cv_model_route(e2, model_genes, stage_of, folds, tmp, disp_prior_path=None):
         subprocess.run(cmd, check=True, cwd=str(config.GLMM_FIT_R.parent))
 
         fold_fits = squeeze_fold(pd.read_csv(f"{tmp}/res_{fi}.csv").set_index("gene"))
-        Xa_te = np.column_stack([np.ones(len(te)), e2.X_hc_scaled[te]])
+        Xa_te = np.column_stack([np.ones(len(te)), scaler.transform(e2.X_hc_raw[te])])
         for g in model_genes:
             if g not in fold_fits.index:
                 fold_stat_rows.append(dict(gene=g, fold=fi, stage=stage_of[g], ok=False,
@@ -120,7 +122,8 @@ def cv_pool_route(e2, genes_t, folds, tmp):
         return {}, {}, []
     rows, fold_stats = [], []
     for fi, (tr, te) in enumerate(folds):
-        pd.DataFrame(e2.X_hc_scaled[tr], columns=config.BIAS_COLUMNS).to_csv(f"{tmp}/Xp_{fi}.csv.gz")
+        scaler = StandardScaler().fit(e2.X_hc_raw[tr])
+        pd.DataFrame(scaler.transform(e2.X_hc_raw[tr]), columns=config.BIAS_COLUMNS).to_csv(f"{tmp}/Xp_{fi}.csv.gz")
         Y_tr = e2.Y_hc[tr][:, [e2._gene_col[g] for g in genes_t]]
         pd.DataFrame(Y_tr, columns=genes_t).to_csv(f"{tmp}/Yp_{fi}.csv.gz")
         pd.DataFrame({"Batch_ID": e2.batch[tr]}).to_csv(f"{tmp}/batchp_{fi}.csv.gz")
@@ -144,7 +147,7 @@ def cv_pool_route(e2, genes_t, folds, tmp):
         alpha_eff = fit["alpha"] if fit["family"] == "negbin" else POISSON_ALPHA_EPS
         mean_hc = dict(zip(fit["gene"], fit["mean_hc"]))
         eps = fit["eps"]
-        X_te = e2.X_hc_scaled[te]
+        X_te = scaler.transform(e2.X_hc_raw[te])
         mult = np.exp(X_te @ beta[1:])
         if fit.get("mult_lo") is not None:
             mult = np.clip(mult, fit["mult_lo"], fit["mult_hi"])

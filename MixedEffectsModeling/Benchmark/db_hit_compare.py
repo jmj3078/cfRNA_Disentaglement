@@ -36,28 +36,28 @@ MARKER_SCORE_FLOOR = 0.05
 def load_reference(topn=MARKER_TOPN, score_floor=MARKER_SCORE_FLOOR):
     """{phenotype: set(symbols)} from Open Targets, top-N by score above a floor."""
     out = {}
-    for f in REF_DIR.glob('*.json'):
+    for f in REF_DIR.glob("*.json"):
         import json
         r = json.load(open(f))
-        if r['phenotype'] == 'MGUS':  # OT association pool too thin (22 genes) for any panel size
+        if r["phenotype"] == "MGUS":  # OT association pool too thin (22 genes) for any panel size
             continue
-        ranked = sorted(r['genes'], key=lambda gs: -gs[1])
+        ranked = sorted(r["genes"], key=lambda gs: -gs[1])
         floored = [g for g, s in ranked if s >= score_floor]
-        out[r['phenotype']] = set(floored[:topn]) | set(r.get('supplement', {}).get('genes', []))
+        out[r["phenotype"]] = set(floored[:topn]) | set(r.get("supplement", {}).get("genes", []))
     return out
 
 
 def ensg_to_symbol():
-    return sc.read_h5ad(config.H5AD_PATH, backed='r').var['GeneName']
+    return sc.read_h5ad(config.H5AD_PATH, backed="r").var["GeneName"]
 
 
 def deseq2_tag(study, pheno):
-    return f"{study.replace(' ', '_')}__{pheno.replace('/', '-').replace(' ', '_')}"
+    return f"{study.replace(" ", "_")}__{pheno.replace("/", "-").replace(" ", "_")}"
 
 
 def deseq2_study_results(design):
     """{(study, phenotype): results_df} for one design, indexed by base ENSG (no version)."""
-    summary = pd.read_csv(DESEQ_DIR / 'summary.csv')
+    summary = pd.read_csv(DESEQ_DIR / "summary.csv")
     summary = summary[summary.design == design]
     out = {}
     for _, row in summary.iterrows():
@@ -65,7 +65,7 @@ def deseq2_study_results(design):
         if not path.exists():
             continue
         res = pd.read_csv(path, index_col=0)
-        res.index = res.index.str.split('.').str[0]
+        res.index = res.index.str.split(".").str[0]
         out[(row.study, row.phenotype)] = res
     return out
 
@@ -73,10 +73,10 @@ def deseq2_study_results(design):
 def deseq2_gene_sets(design, sym_of):
     """{phenotype: set(symbols)} pooling padj<0.05 genes across studies (union)."""
     sym_of = sym_of.copy()
-    sym_of.index = sym_of.index.str.split('.').str[0]
+    sym_of.index = sym_of.index.str.split(".").str[0]
     out = {}
     for (study, pheno), res in deseq2_study_results(design).items():
-        sig = res.index[res['padj'] < 0.05]
+        sig = res.index[res["padj"] < 0.05]
         syms = set(sym_of.reindex(sig).dropna())
         out.setdefault(pheno, set()).update(syms)
     return out
@@ -86,11 +86,11 @@ def pc_dirs_by_phenotype(sample_meta):
     """{phenotype: [pdir, ...]} -- resolves PathwayConvergence subdirs (some phenotypes are
     split per-study) back to the canonical phenotype via the samples actually inside sig.pkl,
     not by parsing directory names."""
-    ph_of = sample_meta.set_index('sample')['phenotype']
+    ph_of = sample_meta.set_index("sample")["phenotype"]
     out = {}
-    for pdir in sorted(d for d in PC_DIR.iterdir() if d.is_dir() and (d / 'sig.pkl').exists()):
-        d = pickle.load(open(pdir / 'sig.pkl', 'rb'))
-        phenos = ph_of.reindex(d['names_c']).dropna().unique()
+    for pdir in sorted(d for d in PC_DIR.iterdir() if d.is_dir() and (d / "sig.pkl").exists()):
+        d = pickle.load(open(pdir / "sig.pkl", "rb"))
+        phenos = ph_of.reindex(d["names_c"]).dropna().unique()
         if len(phenos) != 1:
             raise ValueError(f"{pdir} mixes phenotypes: {phenos}")
         out.setdefault(phenos[0], []).append(pdir)
@@ -100,8 +100,8 @@ def pc_dirs_by_phenotype(sample_meta):
 def model_route_mask(gene_names):
     """Bool array over gene_names, True for individually-fitted ('model' route) genes --
     False excludes the ~2060 pooled-GLM ('rare') genes, for the no-rare-pooling comparison."""
-    ts = pd.read_csv(config.ENGINE_MIXED_DIR / 'training_summary.csv').set_index('gene')['route']
-    return (ts.reindex(gene_names) == 'model').values
+    ts = pd.read_csv(config.ENGINE_MIXED_DIR / "training_summary.csv").set_index("gene")["route"]
+    return (ts.reindex(gene_names) == "model").values
 
 
 def normative_gene_hits(sample_meta, gene_names, sym_of, q=0.05, Z=None, exclude_pool=False):
@@ -115,12 +115,12 @@ def normative_gene_hits(sample_meta, gene_names, sym_of, q=0.05, Z=None, exclude
     exclude_pool=True restricts to individually-fitted genes (drops the pooled-GLM rare route)."""
     from scipy.stats import norm
     if Z is None:
-        Z = np.load(ZDIR / 'Z_disease_shash.npy')
+        Z = np.load(ZDIR / "Z_disease_shash.npy")
     p_all = 2 * norm.sf(np.abs(Z))
     sym_arr = sym_of.reindex(gene_names).values
     col_mask = model_route_mask(gene_names) if exclude_pool else None
     out = {}
-    for pheno, sub in sample_meta[sample_meta.ood_keep].groupby('phenotype'):
+    for pheno, sub in sample_meta[sample_meta.ood_keep].groupby("phenotype"):
         per_patient = []
         for i in sub.index:
             row = p_all[i]
@@ -151,10 +151,10 @@ def gene_venn_sets():
     """{phenotype: (deseq2_no_cov, deseq2_cov, normative_union)} symbol sets, phenotypes
     present in all three methods only."""
     sym_of = ensg_to_symbol()
-    sm = pd.read_csv(ZDIR / 'sample_meta.csv')
-    gene_names = pickle.load(open(ZDIR / 'gene_names.pkl', 'rb'))
-    nocov = deseq2_gene_sets('no_covariate', sym_of)
-    cov = deseq2_gene_sets('covariate', sym_of)
+    sm = pd.read_csv(ZDIR / "sample_meta.csv")
+    gene_names = pickle.load(open(ZDIR / "gene_names.pkl", "rb"))
+    nocov = deseq2_gene_sets("no_covariate", sym_of)
+    cov = deseq2_gene_sets("covariate", sym_of)
     norm_union = gene_sets_from_hits(normative_gene_hits(sm, gene_names, sym_of), K=1)
     return {ph: (nocov[ph], cov[ph], norm_union[ph])
             for ph in sorted(set(nocov) & set(cov) & set(norm_union))}
@@ -168,18 +168,18 @@ def db_hit_row(phenotype, method, sig_set, ref):
                 has_ot_ref=len(dref) > 0)
 
 
-def gene_level_db_hits(save=True, designs=('no_covariate', 'covariate', 'ruvg_k1', 'ruvg_k2', 'ruvg_k3'),
+def gene_level_db_hits(save=True, designs=("no_covariate", "covariate", "ruvg_k1", "ruvg_k2", "ruvg_k3"),
                        recur_ks=(1, 3)):
     """Symmetric gene-level DB-hit table: every DESeq2 design in `designs` + normative gene sets at
     each recurrence threshold in `recur_ks` (K=1 -> normative_union, K=3 -> normative_recur3, same
     convention as pathway-level) + per-patient normative rate distribution."""
     ref = load_reference()
     sym_of = ensg_to_symbol()
-    sm = pd.read_csv(ZDIR / 'sample_meta.csv')
-    gene_names = pickle.load(open(ZDIR / 'gene_names.pkl', 'rb'))
+    sm = pd.read_csv(ZDIR / "sample_meta.csv")
+    gene_names = pickle.load(open(ZDIR / "gene_names.pkl", "rb"))
 
     design_sets = {d: deseq2_gene_sets(d, sym_of) for d in designs}
-    Z = np.load(ZDIR / 'Z_disease_shash.npy')
+    Z = np.load(ZDIR / "Z_disease_shash.npy")
     hits = normative_gene_hits(sm, gene_names, sym_of, Z=Z)
     norm_by_k = {K: gene_sets_from_hits(hits, K=K) for K in recur_ks}
 
@@ -194,7 +194,7 @@ def gene_level_db_hits(save=True, designs=('no_covariate', 'covariate', 'ruvg_k1
                 rows.append(db_hit_row(pheno, DESIGN_LABELS[design], ds[pheno], ref))
         for K, norm_sets in norm_by_k.items():
             if pheno in norm_sets:
-                label = 'normative_union' if K == 1 else f'normative_recur{K}'
+                label = "normative_union" if K == 1 else f'normative_recur{K}'
                 rows.append(db_hit_row(pheno, label, norm_sets[pheno], ref))
 
     rates = pd.DataFrame(rows)
@@ -202,16 +202,16 @@ def gene_level_db_hits(save=True, designs=('no_covariate', 'covariate', 'ruvg_k1
     pp_rows = []
     for pheno, patients in hits.items():
         for syms in patients:
-            r = db_hit_row(pheno, 'normative_persample', syms, ref)
+            r = db_hit_row(pheno, "normative_persample", syms, ref)
             pp_rows.append(r)
     persample = pd.DataFrame(pp_rows)
     persample_summary = (persample[persample.has_ot_ref]
-                          .groupby('phenotype')['db_hit_rate']
-                          .agg(['median', 'count']).reset_index())
+                          .groupby("phenotype")["db_hit_rate"]
+                          .agg(["median", "count"]).reset_index())
 
     if save:
-        rates.to_csv(HERE / 'gene_db_hit_rates.csv', index=False)
-        persample.to_csv(HERE / 'gene_db_hit_rates_persample.csv', index=False)
+        rates.to_csv(HERE / "gene_db_hit_rates.csv", index=False)
+        persample.to_csv(HERE / "gene_db_hit_rates_persample.csv", index=False)
     return rates, persample_summary
 
 
@@ -237,7 +237,7 @@ def deseq2_pathway_sig(stat_series, gene_names_base, universe_syms, sym2idx, col
     null_path = (NULL_DIR / f"{cache_key}.npz") if cache_key else None
     if null_path and null_path.exists():
         d = np.load(null_path)
-        null_mean, null_sd = d['null_mean'], d['null_sd']
+        null_mean, null_sd = d["null_mean"], d["null_sd"]
     else:
         rng = np.random.default_rng(seed)
         null_sum, null_sumsq = np.zeros_like(T), np.zeros_like(T)
@@ -257,7 +257,7 @@ def deseq2_pathway_sig(stat_series, gene_names_base, universe_syms, sym2idx, col
     Tz = (T - null_mean) / null_sd
     from scipy.stats import norm
     p = 2 * norm.sf(np.abs(Tz))
-    reject = bh_fdr_reject(p[0], q=config.PATHWAY_CONV_PARAMS['fdr_q'])
+    reject = bh_fdr_reject(p[0], q=config.PATHWAY_CONV_PARAMS["fdr_q"])
     return {t for t, r in zip(terms, reject) if r}
 
 
@@ -282,14 +282,14 @@ def normative_pathway_recurrence(pdirs):
     """{term: n_patients_hit} pooled across pdirs (a phenotype may span multiple per-study dirs)."""
     counts = {}
     for pdir in pdirs:
-        d = pickle.load(open(pdir / 'sig.pkl', 'rb'))
-        hits = d['path_sig'].sum(axis=0)
-        for t, c in zip(d['terms'], hits):
+        d = pickle.load(open(pdir / "sig.pkl", "rb"))
+        hits = d["path_sig"].sum(axis=0)
+        for t, c in zip(d["terms"], hits):
             counts[t] = counts.get(t, 0) + int(c)
     return counts
 
 
-def pathway_level_db_hits(save=True, designs=('no_covariate', 'covariate', 'ruvg_k1', 'ruvg_k2', 'ruvg_k3'),
+def pathway_level_db_hits(save=True, designs=("no_covariate", "covariate", "ruvg_k1", "ruvg_k2", "ruvg_k3"),
                           recur_ks=(1, 3)):
     """recur_ks: normative pathway is 'detected' if significant in >=K patients (K=1 is the plain
     union -- 'at least one patient', which saturates toward the whole library as n_pat grows since
@@ -300,18 +300,18 @@ def pathway_level_db_hits(save=True, designs=('no_covariate', 'covariate', 'ruvg
     terms, M = load_pathway_library()
     ref_path = {ph: reference_pathways(syms, sym2idx, terms, M) for ph, syms in ref.items()}
 
-    gene_names = pickle.load(open(ZDIR / 'gene_names.pkl', 'rb'))
-    gene_names_base = pd.Index(gene_names).str.split('.').str[0]
+    gene_names = pickle.load(open(ZDIR / "gene_names.pkl", "rb"))
+    gene_names_base = pd.Index(gene_names).str.split(".").str[0]
 
-    sm = pd.read_csv(ZDIR / 'sample_meta.csv')
+    sm = pd.read_csv(ZDIR / "sample_meta.csv")
     pc_map = pc_dirs_by_phenotype(sm)
-    summary = pd.read_csv(DESEQ_DIR / 'summary.csv')
+    summary = pd.read_csv(DESEQ_DIR / "summary.csv")
 
     rows = []
     for pheno, pdirs in pc_map.items():
         recur = normative_pathway_recurrence(pdirs)
         for K in recur_ks:
-            label = 'normative_union' if K == 1 else f'normative_recur{K}'
+            label = "normative_union" if K == 1 else f'normative_recur{K}'
             detected = {t for t, c in recur.items() if c >= K}
             rows.append(db_hit_row(pheno, label, detected, ref_path))
 
@@ -324,9 +324,9 @@ def pathway_level_db_hits(save=True, designs=('no_covariate', 'covariate', 'ruvg
                 if not path.exists():
                     continue
                 res = pd.read_csv(path, index_col=0)
-                res.index = res.index.str.split('.').str[0]
+                res.index = res.index.str.split(".").str[0]
                 cache_key = f"{design}__{deseq2_tag(r.study, pheno)}"
-                sig = deseq2_pathway_sig(res['stat'].dropna(), gene_names_base, universe_syms,
+                sig = deseq2_pathway_sig(res["stat"].dropna(), gene_names_base, universe_syms,
                                          sym2idx, col2sym, terms, M, cache_key=cache_key)
                 union |= sig
             if studies.shape[0]:
@@ -334,5 +334,5 @@ def pathway_level_db_hits(save=True, designs=('no_covariate', 'covariate', 'ruvg
 
     rates = pd.DataFrame(rows)
     if save:
-        rates.to_csv(HERE / 'pathway_db_hit_rates.csv', index=False)
+        rates.to_csv(HERE / "pathway_db_hit_rates.csv", index=False)
     return rates

@@ -76,6 +76,7 @@ class GeneRecordMixed:
 
 class NormativeModelEngineMixed:
     def __init__(self):
+        self.X_hc_raw = None
         self.X_hc_scaled = None
         self.Y_hc = None
         self.scaler = None
@@ -106,6 +107,7 @@ class NormativeModelEngineMixed:
         keep = np.array([b not in small for b in batch_hc])
 
         X_raw = adata.obs[config.BIAS_COLUMNS].values.astype(np.float64)[is_hc][keep]
+        self.X_hc_raw = X_raw
         self.scaler = StandardScaler()
         self.X_hc_scaled = self.scaler.fit_transform(X_raw)
         self.batch = batch_hc[keep]

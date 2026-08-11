@@ -15,22 +15,22 @@ PCDIR = config.PATHWAY_CONV_DIR
 
 
 def slugify(phenotype):
-    return phenotype.strip().replace(' ', '_').replace('/', '-')
+    return phenotype.strip().replace(" ", "_").replace("/", "-")
 
 
 # ENSG -> gene-symbol vocabulary is phenotype-independent (fixed by the H5AD var table), cached once
 # and reused across phenotypes. Zu/Fm (the collapsed Z matrix) is NOT -- it depends on which patients
 # are in the cohort, so it's computed fresh per phenotype in collapse_to_symbols below.
 def load_symbol_vocab(gene_names):
-    path = PCDIR / 'symbol_vocab.pkl'
+    path = PCDIR / "symbol_vocab.pkl"
     if path.exists():
-        return pickle.load(open(path, 'rb'))
-    sym_of = sc.read_h5ad(config.H5AD_PATH, backed='r').var['GeneName'].reindex(gene_names)
+        return pickle.load(open(path, "rb"))
+    sym_of = sc.read_h5ad(config.H5AD_PATH, backed="r").var["GeneName"].reindex(gene_names)
     syms_all = sym_of.values
     universe_syms = pd.unique(syms_all[sym_of.notna().values])
     sym2idx = {s: i for i, s in enumerate(universe_syms)}
     col2sym = np.array([sym2idx.get(s, -1) if pd.notna(s) else -1 for s in syms_all])
-    pickle.dump((universe_syms, sym2idx, col2sym), open(path, 'wb'))
+    pickle.dump((universe_syms, sym2idx, col2sym), open(path, "wb"))
     return universe_syms, sym2idx, col2sym
 
 
@@ -50,13 +50,13 @@ def collapse_to_symbols(Zc, col2sym, N):
 
 # pathway gene-set membership (KEGG+Reactome, housekeeping-excluded) is also phenotype-independent
 def load_pathway_library():
-    lib_path = PCDIR / 'gene_set_matrix.pkl'
+    lib_path = PCDIR / "gene_set_matrix.pkl"
     if lib_path.exists():
-        terms_raw, M_raw = pickle.load(open(lib_path, 'rb'))
+        terms_raw, M_raw = pickle.load(open(lib_path, "rb"))
     else:
         libs = {}
-        for lib in PP['gene_sets']:
-            libs.update(gp.get_library(lib, organism='human'))
+        for lib in PP["gene_sets"]:
+            libs.update(gp.get_library(lib, organism="human"))
         universe_syms, sym2idx, _ = load_symbol_vocab(None)
         N = len(universe_syms)
         terms_raw = list(libs.keys())
@@ -66,14 +66,14 @@ def load_pathway_library():
                 j = sym2idx.get(g)
                 if j is not None:
                     M_raw[ti, j] = True
-        keep = M_raw.sum(axis=1) >= PP['min_pathway_size']
+        keep = M_raw.sum(axis=1) >= PP["min_pathway_size"]
         terms_raw, M_raw = [t for t, k in zip(terms_raw, keep) if k], M_raw[keep]
-        pickle.dump((terms_raw, M_raw), open(lib_path, 'wb'))
+        pickle.dump((terms_raw, M_raw), open(lib_path, "wb"))
 
-    ribo_idx = np.where(M_raw[terms_raw.index(PP['ribo_reference_term'])])[0]
+    ribo_idx = np.where(M_raw[terms_raw.index(PP["ribo_reference_term"])])[0]
     frac_ribo = M_raw[:, ribo_idx].sum(axis=1) / M_raw.sum(axis=1)
-    kw_rx = re.compile('|'.join(PP['exclude_keywords']), re.IGNORECASE)
-    keep_hk = (frac_ribo <= PP['ribo_frac_max']) & np.array([not kw_rx.search(t) for t in terms_raw])
+    kw_rx = re.compile("|".join(PP["exclude_keywords"]), re.IGNORECASE)
+    keep_hk = (frac_ribo <= PP["ribo_frac_max"]) & np.array([not kw_rx.search(t) for t in terms_raw])
     terms, M = [t for t, k in zip(terms_raw, keep_hk) if k], M_raw[keep_hk]
     return terms, M
 
@@ -89,14 +89,14 @@ def run_phenotype(phenotype, Z, gene_names, meta, universe_syms, sym2idx, col2sy
     slug = slugify(label)
     # exact match, not stripped -- meta has a separate 'Pancreatic Cancer ' (trailing space, 2 rows)
     # variant; merging it in would silently change the cohort against the existing 72-patient cache
-    cohort_mask = (meta['phenotype'] == phenotype) & meta['ood_keep']
+    cohort_mask = (meta["phenotype"] == phenotype) & meta["ood_keep"]
     if include_batches:
-        cohort_mask &= meta['batch'].isin(include_batches)
+        cohort_mask &= meta["batch"].isin(include_batches)
     idx = np.where(cohort_mask.values)[0]
     n_pat = len(idx)
     if n_pat == 0:
         return None
-    names_c = meta['sample'].values[idx]
+    names_c = meta["sample"].values[idx]
     Zc = Z[idx]
 
     pdir = PCDIR / slug
@@ -109,48 +109,48 @@ def run_phenotype(phenotype, Z, gene_names, meta, universe_syms, sym2idx, col2sy
         finite = np.isfinite(row)
         reject = np.zeros(len(row), dtype=bool)
         if finite.any():
-            reject[finite] = bh_fdr_reject(row[finite], q=PP['fdr_q'])
+            reject[finite] = bh_fdr_reject(row[finite], q=PP["fdr_q"])
         gene_sig[i] = reject
     n_gene_sig = gene_sig.sum(axis=1)
 
     N = len(universe_syms)
-    zu_path = pdir / 'universe.pkl'
+    zu_path = pdir / "universe.pkl"
     if zu_path.exists():
-        Zu, Fm = pickle.load(open(zu_path, 'rb'))
+        Zu, Fm = pickle.load(open(zu_path, "rb"))
     else:
         Zu, Fm = collapse_to_symbols(Zc, col2sym, N)
-        pickle.dump((Zu, Fm), open(zu_path, 'wb'))
+        pickle.dump((Zu, Fm), open(zu_path, "wb"))
 
     Mf = M.astype(float)
-    null_path = pdir / 'null.npz'
+    null_path = pdir / "null.npz"
     if null_path.exists():
         d = np.load(null_path)
-        T, null_mean, null_sd = d['T'], d['null_mean'], d['null_sd']
+        T, null_mean, null_sd = d["T"], d["null_mean"], d["null_sd"]
     else:
         num, den = (Zu * Fm) @ Mf.T, Fm @ Mf.T
         T = np.divide(num, den, out=np.zeros_like(num), where=den > 0)
-        rng = np.random.default_rng(PP['seed'])
+        rng = np.random.default_rng(PP["seed"])
         null_sum, null_sumsq = np.zeros_like(T), np.zeros_like(T)
-        for _ in range(PP['n_null_perm']):
+        for _ in range(PP["n_null_perm"]):
             perm = rng.permutation(N)
             Zp, Fp = Zu[:, perm], Fm[:, perm]
             nu, de = (Zp * Fp) @ Mf.T, Fp @ Mf.T
             Tn = np.divide(nu, de, out=np.zeros_like(nu), where=de > 0)
             null_sum += Tn
             null_sumsq += Tn ** 2
-        null_mean = null_sum / PP['n_null_perm']
-        null_sd = np.sqrt(np.clip(null_sumsq / PP['n_null_perm'] - null_mean ** 2, 1e-12, None))
+        null_mean = null_sum / PP["n_null_perm"]
+        null_sd = np.sqrt(np.clip(null_sumsq / PP["n_null_perm"] - null_mean ** 2, 1e-12, None))
         np.savez(null_path, T=T, null_mean=null_mean, null_sd=null_sd)
 
     Tz = (T - null_mean) / null_sd
     p_path = 2 * norm.sf(np.abs(Tz))
     path_sig = np.zeros_like(p_path, dtype=bool)
     for i in range(n_pat):
-        path_sig[i] = bh_fdr_reject(p_path[i], q=PP['fdr_q'])
+        path_sig[i] = bh_fdr_reject(p_path[i], q=PP["fdr_q"])
     n_path_sig = path_sig.sum(axis=1)
 
     pickle.dump(dict(names_c=names_c, terms=terms, gene_sig=gene_sig, path_sig=path_sig, Tz=Tz),
-                open(pdir / 'sig.pkl', 'wb'))
+                open(pdir / "sig.pkl", "wb"))
 
     return dict(
         phenotype=label, n_pat=n_pat,
@@ -161,7 +161,7 @@ def run_phenotype(phenotype, Z, gene_names, meta, universe_syms, sym2idx, col2sy
 
 
 def strip_reactome_code(name):
-    return name.split(' R-HSA-')[0]
+    return name.split(" R-HSA-")[0]
 
 
 # subagent-written literature reviews all use "## Selected pathways" -> "### [N.] Name [-- tier note]"
@@ -171,8 +171,8 @@ def parse_selected_pathways(md_path):
     lines = open(md_path).read().splitlines()
     names, in_section = [], False
     for line in lines:
-        if line.strip().startswith('## '):
-            in_section = line.strip().lstrip('#').strip().lower() == 'selected pathways'
+        if line.strip().startswith("## "):
+            in_section = line.strip().lstrip("#").strip().lower() == "selected pathways"
             continue
         if in_section:
             m = re.match(r'^###\s*(?:\d+\.\s*)?(.+?)\s*$', line.strip())
@@ -191,7 +191,7 @@ def match_pathway_index(name, terms):
     paren = re.search(r'\(([^)]+)\)', name)
     if paren:
         candidates.append(paren.group(1))
-        candidates.append(re.sub(r'\s*\([^)]+\)', '', name).strip())
+        candidates.append(re.sub(r'\s*\([^)]+\)', "", name).strip())
 
     import difflib
     for cand in candidates:
