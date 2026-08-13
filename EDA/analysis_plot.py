@@ -409,7 +409,7 @@ def plot_rda_variance_partition(df_partition, title, x_label="Studies (Authors)"
                                  figsize=None, save_path=None):
     """Stacked horizontal bar chart of variance partition."""
     part_cols = ["pheno_unique", "conf_unique", "shared", "unexplained"]
-    part_labels = ["Phenotype Unique", "Confounder Unique", "Shared", "Unexplained"]
+    part_labels = ["Phenotype Unique", "Covariate Unique", "Shared", "Unexplained"]
     part_colors = ["steelblue", "coral", "mediumseagreen", "lightgrey"]
     df_plot = df_partition[part_cols].fillna(0)
     fig_h = figsize[1] if figsize else max(5, len(df_plot) * 0.4 + 2)
@@ -462,7 +462,7 @@ def plot_normalization_partition(df_partition_all, studies, save_path=None):
     axes_flat = [axes] if n_rows * n_cols == 1 else axes.flatten()
 
     part_cols = ["pheno_unique", "conf_unique", "shared", "unexplained"]
-    part_labels = ["Phenotype Unique", "Confounder Unique", "Shared", "Unexplained"]
+    part_labels = ["Phenotype Unique", "Covariate Unique", "Shared", "Unexplained"]
     part_colors = ["steelblue", "coral", "mediumseagreen", "lightgrey"]
     for i, study in enumerate(studies):
         ax = axes_flat[i]
@@ -579,7 +579,7 @@ def plot_hc_rda_results(sr_unique, r2_all, batch_col, layer, unique_dict, save_p
     shared = max(0.0, r2_all - conf_unique_sum)
     unexplained = max(0.0, 1.0 - r2_all)
     part_vals = [conf_unique_sum, shared, unexplained]
-    part_labels = ["Confounder Unique (sum)", "Shared", "Unexplained"]
+    part_labels = ["Covariate Unique (sum)", "Shared", "Unexplained"]
     part_colors = ["coral", "mediumseagreen", "lightgrey"]
     fig2, ax2 = plt.subplots(figsize=(6.5, 1.0))
     bottom = 0.0

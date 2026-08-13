@@ -52,7 +52,7 @@ def ensg_to_symbol():
 
 
 def deseq2_tag(study, pheno):
-    return f"{study.replace(" ", "_")}__{pheno.replace("/", "-").replace(" ", "_")}"
+    return f"{study.replace(' ', '_')}__{pheno.replace('/', '-').replace(' ', '_')}"
 
 
 def deseq2_study_results(design):
@@ -70,13 +70,13 @@ def deseq2_study_results(design):
     return out
 
 
-def deseq2_gene_sets(design, sym_of):
-    """{phenotype: set(symbols)} pooling padj<0.05 genes across studies (union)."""
+def deseq2_gene_sets(design, sym_of, alpha=0.05):
+    """{phenotype: set(symbols)} pooling padj<alpha genes across studies (union)."""
     sym_of = sym_of.copy()
     sym_of.index = sym_of.index.str.split(".").str[0]
     out = {}
     for (study, pheno), res in deseq2_study_results(design).items():
-        sig = res.index[res["padj"] < 0.05]
+        sig = res.index[res["padj"] < alpha]
         syms = set(sym_of.reindex(sig).dropna())
         out.setdefault(pheno, set()).update(syms)
     return out
@@ -147,17 +147,212 @@ def gene_sets_from_hits(per_patient_hits, K=1):
     return out
 
 
-def gene_venn_sets():
-    """{phenotype: (deseq2_no_cov, deseq2_cov, normative_union)} symbol sets, phenotypes
-    present in all three methods only."""
+def gene_venn_sets(design_b="covariate"):
+    """{phenotype: (deseq2_no_cov, deseq2_<design_b>, normative_union)} symbol sets, phenotypes
+    present in all three methods only. design_b='ruvg_k1' swaps the second circle to
+    RUVg-corrected DESeq2 instead of explicit-covariate DESeq2."""
+    sym_of = ensg_to_symbol()
+    sm = pd.read_csv(ZDIR / "sample_meta.csv")
+    gene_names = pickle.load(open(ZDIR / "gene_names.pkl", "rb"))
+    nocov = deseq2_gene_sets("no_covariate", sym_of)
+    db = deseq2_gene_sets(design_b, sym_of)
+    norm_union = gene_sets_from_hits(normative_gene_hits(sm, gene_names, sym_of), K=1)
+    return {ph: (nocov[ph], db[ph], norm_union[ph])
+            for ph in sorted(set(nocov) & set(db) & set(norm_union))}
+
+
+def novel_gene_table():
+    """One row per (phenotype, gene) for genes normative flags (union, K=1) that neither DESeq2
+    design (no_covariate/covariate) reaches, restricted to genes with an Open Targets association
+    score -- i.e. disease-relevant per DB, missed by the group-wise comparison. Also checked
+    against Benchmark/literature_biomarkers.json (the original source paper's own named
+    biomarker panel, where available) via `in_literature_panel` -- rows where this is False
+    (and `lit_panel_available` is True) are missed by BOTH DESeq2 and the source paper's own
+    biomarker list, not just DESeq2."""
+    import json
+    sym_of = ensg_to_symbol()
+    sm = pd.read_csv(ZDIR / "sample_meta.csv")
+    gene_names = pickle.load(open(ZDIR / "gene_names.pkl", "rb"))
+    nocov = deseq2_gene_sets("no_covariate", sym_of)
+    cov = deseq2_gene_sets("covariate", sym_of)
+    hits = normative_gene_hits(sm, gene_names, sym_of)
+    norm_union = gene_sets_from_hits(hits, K=1)
+
+    counts_by_pheno = {}
+    for pheno, per_patient in hits.items():
+        c = {}
+        for syms in per_patient:
+            for s in syms:
+                c[s] = c.get(s, 0) + 1
+        counts_by_pheno[pheno] = c
+
+    ref = load_reference()  # same top-300/floor-0.05 marker panel as db_hit_row elsewhere
+    ref_scores = {}
+    for f in REF_DIR.glob("*.json"):
+        r = json.load(open(f))
+        ref_scores[r["phenotype"]] = dict(r["genes"])
+    lit = json.load(open(HERE / "literature_biomarkers.json"))
+
+    rows = []
+    for pheno in sorted(set(nocov) & set(cov) & set(norm_union)):
+        novel = norm_union[pheno] - nocov[pheno] - cov[pheno]
+        scores = ref_scores.get(pheno, {})
+        n_total = len(hits[pheno])
+        lit_entry = lit.get(pheno, {})
+        lit_available = len(lit_entry.get("genes", [])) > 0
+        for g in novel & ref.get(pheno, set()):
+            if g in scores:
+                rows.append(dict(phenotype=pheno, gene=g, ot_score=scores[g],
+                                  n_patients=counts_by_pheno[pheno].get(g, 0), n_total=n_total,
+                                  lit_panel_available=lit_available,
+                                  in_literature_panel=g in lit_entry.get("genes", [])))
+    df = pd.DataFrame(rows)
+    df["recur_pct"] = (100 * df.n_patients / df.n_total).round(1)
+    return df.sort_values(["phenotype", "ot_score"], ascending=[True, False]).reset_index(drop=True)
+
+
+def literature_overlap_table():
+    """One row per (phenotype, literature-reported biomarker gene): whether normative and/or
+    DESeq2 (either design) recover it. Source: Benchmark/literature_biomarkers.json, curated
+    per-study from the original cfRNA papers -- see that file's 'confidence'/'notes' fields,
+    several panels are low-confidence (automated PDF extraction) or explicitly unavailable."""
+    import json
+    lit = json.load(open(HERE / "literature_biomarkers.json"))
     sym_of = ensg_to_symbol()
     sm = pd.read_csv(ZDIR / "sample_meta.csv")
     gene_names = pickle.load(open(ZDIR / "gene_names.pkl", "rb"))
     nocov = deseq2_gene_sets("no_covariate", sym_of)
     cov = deseq2_gene_sets("covariate", sym_of)
     norm_union = gene_sets_from_hits(normative_gene_hits(sm, gene_names, sym_of), K=1)
-    return {ph: (nocov[ph], cov[ph], norm_union[ph])
-            for ph in sorted(set(nocov) & set(cov) & set(norm_union))}
+
+    rows = []
+    for pheno, entry in lit.items():
+        genes = entry["genes"]
+        for g in genes:
+            rows.append(dict(
+                phenotype=pheno, gene=g, confidence=entry["confidence"],
+                normative_hit=g in norm_union.get(pheno, set()),
+                deseq2_hit=g in nocov.get(pheno, set()) or g in cov.get(pheno, set()),
+            ))
+        if not genes:
+            rows.append(dict(phenotype=pheno, gene=None, confidence=entry["confidence"],
+                              normative_hit=None, deseq2_hit=None))
+    return pd.DataFrame(rows)
+
+
+def discovery_summary():
+    """Per-phenotype: of all normative-significant genes (union, K=1, regardless of DESeq2
+    status), how many are already named in the source paper's own biomarker panel
+    (literature_biomarkers.json) vs newly discovered, and of the newly-discovered set how many
+    carry Open Targets disease-association support (DB-validated). Answers 'how many
+    DB-validated signals are new, not just literature reproduced' directly, without requiring
+    the gene to also be missed by DESeq2 (see novel_gene_table for that stricter cut)."""
+    import json
+    sym_of = ensg_to_symbol()
+    sm = pd.read_csv(ZDIR / "sample_meta.csv")
+    gene_names = pickle.load(open(ZDIR / "gene_names.pkl", "rb"))
+    norm_union = gene_sets_from_hits(normative_gene_hits(sm, gene_names, sym_of), K=1)
+    ref = load_reference()
+    lit = json.load(open(HERE / "literature_biomarkers.json"))
+
+    rows = []
+    for pheno, sig in norm_union.items():
+        lit_entry = lit.get(pheno, {})
+        lit_genes = set(lit_entry.get("genes", []))
+        known = sig & lit_genes
+        new = sig - lit_genes
+        new_validated = new & ref.get(pheno, set())
+        rows.append(dict(
+            phenotype=pheno, n_sig=len(sig), lit_panel_available=len(lit_genes) > 0,
+            n_literature_known=len(known), n_newly_discovered=len(new),
+            n_newly_discovered_db_validated=len(new_validated),
+            pct_new_db_validated=round(100 * len(new_validated) / len(new), 1) if new else np.nan,
+        ))
+    return pd.DataFrame(rows).sort_values("phenotype").reset_index(drop=True)
+
+
+def discovery_gene_table():
+    """Gene-level detail behind discovery_summary: one row per (phenotype, gene) for normative
+    -significant genes not in the source paper's own biomarker panel, restricted to genes with
+    Open Targets disease-association support -- the newly-discovered, DB-validated signal set."""
+    import json
+    sym_of = ensg_to_symbol()
+    sm = pd.read_csv(ZDIR / "sample_meta.csv")
+    gene_names = pickle.load(open(ZDIR / "gene_names.pkl", "rb"))
+    nocov = deseq2_gene_sets("no_covariate", sym_of)
+    cov = deseq2_gene_sets("covariate", sym_of)
+    hits = normative_gene_hits(sm, gene_names, sym_of)
+    norm_union = gene_sets_from_hits(hits, K=1)
+    ref = load_reference()
+    ref_scores = {}
+    for f in REF_DIR.glob("*.json"):
+        r = json.load(open(f))
+        ref_scores[r["phenotype"]] = dict(r["genes"])
+    lit = json.load(open(HERE / "literature_biomarkers.json"))
+
+    counts_by_pheno = {}
+    for pheno, per_patient in hits.items():
+        c = {}
+        for syms in per_patient:
+            for s in syms:
+                c[s] = c.get(s, 0) + 1
+        counts_by_pheno[pheno] = c
+
+    rows = []
+    for pheno, sig in norm_union.items():
+        lit_genes = set(lit.get(pheno, {}).get("genes", []))
+        scores = ref_scores.get(pheno, {})
+        n_total = len(hits[pheno])
+        for g in (sig - lit_genes) & ref.get(pheno, set()):
+            rows.append(dict(
+                phenotype=pheno, gene=g, ot_score=scores.get(g),
+                n_patients=counts_by_pheno[pheno].get(g, 0), n_total=n_total,
+                deseq2_hit=g in nocov.get(pheno, set()) or g in cov.get(pheno, set()),
+            ))
+    df = pd.DataFrame(rows)
+    df["recur_pct"] = (100 * df.n_patients / df.n_total).round(1)
+    return df.sort_values(["phenotype", "ot_score"], ascending=[True, False]).reset_index(drop=True)
+
+
+def final_discovery_panel(deseq2_designs=("no_covariate", "covariate")):
+    """One row per phenotype: total normative-significant genes (union, K=1), how many are
+    newly discovered (not in the source paper's own literature panel), how many of those carry
+    Open Targets disease-association support (DB-validated), and how many of THOSE are also
+    missed by every design in `deseq2_designs` (union'd -- a gene counts as a DESeq2 hit if ANY
+    listed design reaches it) -- with the gene list. Default reproduces the original
+    no_covariate/covariate cut; pass deseq2_designs=("no_covariate",) for the pre-RUVg
+    'missing' criterion or deseq2_designs=("ruvg_k1",) for post-RUVg. Phenotypes with no Open
+    Targets reference at all are dropped (nothing to validate against), not zero-filled."""
+    import json
+    sym_of = ensg_to_symbol()
+    sm = pd.read_csv(ZDIR / "sample_meta.csv")
+    gene_names = pickle.load(open(ZDIR / "gene_names.pkl", "rb"))
+    deseq2_sets = [deseq2_gene_sets(d, sym_of) for d in deseq2_designs]
+    norm_union = gene_sets_from_hits(normative_gene_hits(sm, gene_names, sym_of), K=1)
+    ref = load_reference()
+    lit = json.load(open(HERE / "literature_biomarkers.json"))
+
+    rows = []
+    for pheno, sig in norm_union.items():
+        dref = ref.get(pheno, set())
+        if not dref:
+            continue
+        lit_genes = set(lit.get(pheno, {}).get("genes", []))
+        new = sig - lit_genes
+        new_validated = new & dref
+        deseq2_sig = set()
+        for ds in deseq2_sets:
+            deseq2_sig |= ds.get(pheno, set())
+        new_validated_deseq2_missed = sorted(new_validated - deseq2_sig)
+        rows.append(dict(
+            phenotype=pheno,
+            n_sig=len(sig),
+            n_newly_discovered=len(new),
+            n_new_db_validated=len(new_validated),
+            n_new_db_validated_deseq2_missed=len(new_validated_deseq2_missed),
+            genes_new_db_validated_deseq2_missed=", ".join(new_validated_deseq2_missed),
+        ))
+    return pd.DataFrame(rows).sort_values("phenotype").reset_index(drop=True)
 
 
 def db_hit_row(phenotype, method, sig_set, ref):
@@ -169,10 +364,13 @@ def db_hit_row(phenotype, method, sig_set, ref):
 
 
 def gene_level_db_hits(save=True, designs=("no_covariate", "covariate", "ruvg_k1", "ruvg_k2", "ruvg_k3"),
-                       recur_ks=(1, 3)):
+                       recur_ks=(1, 3), q=0.05):
     """Symmetric gene-level DB-hit table: every DESeq2 design in `designs` + normative gene sets at
     each recurrence threshold in `recur_ks` (K=1 -> normative_union, K=3 -> normative_recur3, same
-    convention as pathway-level) + per-patient normative rate distribution."""
+    convention as pathway-level) + per-patient normative rate distribution. `q` is the per-patient
+    BH-FDR threshold for normative significance (DESeq2 sets are unaffected -- those come from
+    their own pre-computed padj<0.05 calls). q!=0.05 writes to q-tagged filenames instead of the
+    default cache, so relaxed-threshold sweeps don't clobber the q=0.05 result."""
     ref = load_reference()
     sym_of = ensg_to_symbol()
     sm = pd.read_csv(ZDIR / "sample_meta.csv")
@@ -180,7 +378,7 @@ def gene_level_db_hits(save=True, designs=("no_covariate", "covariate", "ruvg_k1
 
     design_sets = {d: deseq2_gene_sets(d, sym_of) for d in designs}
     Z = np.load(ZDIR / "Z_disease_shash.npy")
-    hits = normative_gene_hits(sm, gene_names, sym_of, Z=Z)
+    hits = normative_gene_hits(sm, gene_names, sym_of, Z=Z, q=q)
     norm_by_k = {K: gene_sets_from_hits(hits, K=K) for K in recur_ks}
 
     all_phenos = set(hits)
@@ -210,8 +408,9 @@ def gene_level_db_hits(save=True, designs=("no_covariate", "covariate", "ruvg_k1
                           .agg(["median", "count"]).reset_index())
 
     if save:
-        rates.to_csv(HERE / "gene_db_hit_rates.csv", index=False)
-        persample.to_csv(HERE / "gene_db_hit_rates_persample.csv", index=False)
+        tag = "" if q == 0.05 else f"_q{q:g}".replace(".", "")
+        rates.to_csv(HERE / f"gene_db_hit_rates{tag}.csv", index=False)
+        persample.to_csv(HERE / f"gene_db_hit_rates_persample{tag}.csv", index=False)
     return rates, persample_summary
 
 
