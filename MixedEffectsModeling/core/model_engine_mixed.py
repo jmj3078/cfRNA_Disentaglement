@@ -330,7 +330,8 @@ class NormativeModelEngineMixed:
         gene_names = [g for g, r in self.genes.items() if r.ok]
         if not gene_names:
             return
-        Z = self.score(self.X_hc_raw, self.Y_hc, gene_names=gene_names, seed=seed)
+        Y_sub = self.Y_hc[:, [self._gene_col[g] for g in gene_names]]
+        Z = self.score(self.X_hc_raw, Y_sub, gene_names=gene_names, seed=seed)
 
         done = set()
         if progress_path and Path(progress_path).exists():
