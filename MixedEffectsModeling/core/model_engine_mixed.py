@@ -142,7 +142,7 @@ class NormativeModelEngineMixed:
     def _run_glmm_fit(self, tmp_dir, tag, mode, out_csv, disp_prior_path=None):
         fit_params = Path(tmp_dir) / "fit_params.json"
         fit_params.write_text(json.dumps(config.FIT_PARAMS))
-        cmd = ["Rscript", str(config.GLMM_FIT_R), "--x", f"{tmp_dir}/X.csv.gz",
+        cmd = [config.RSCRIPT, str(config.GLMM_FIT_R), "--x", f"{tmp_dir}/X.csv.gz",
                "--y", f"{tmp_dir}/Y_{tag}.csv.gz", "--batch", f"{tmp_dir}/batch.csv.gz",
                "--genes", f"{tmp_dir}/genes_{tag}.csv", "--trend", str(self.trend_path),
                "--mode", mode, "--fit-params", str(fit_params), "--out", out_csv]
@@ -272,7 +272,7 @@ class NormativeModelEngineMixed:
         pd.DataFrame({"gene": pool_genes}).to_csv(f"{tmp_dir}/genes_pool.csv", index=False)
 
         subprocess.run([
-            "Rscript", str(config.GLMM_FIT_POOL_R), "--x", f"{tmp_dir}/X.csv.gz", "--y", f"{tmp_dir}/Y_pool.csv.gz",
+            config.RSCRIPT, str(config.GLMM_FIT_POOL_R), "--x", f"{tmp_dir}/X.csv.gz", "--y", f"{tmp_dir}/Y_pool.csv.gz",
             "--batch", f"{tmp_dir}/batch.csv.gz", "--genes", f"{tmp_dir}/genes_pool.csv",
             "--rare-overdisp-thr", str(MP["rare_overdisp_thr"]), "--out", f"{tmp_dir}/results_pool.json",
         ], check=True, cwd=str(config.GLMM_FIT_POOL_R.parent))

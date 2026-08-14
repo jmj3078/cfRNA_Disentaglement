@@ -1,6 +1,13 @@
+import shutil
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# subprocess.run(["Rscript", ...]) fails if launched without the conda env's
+# bin/ on PATH (e.g. nohup without `conda activate`); fall back to the
+# running interpreter's own env, which ships Rscript alongside python.
+RSCRIPT = shutil.which("Rscript") or str(Path(sys.executable).resolve().parent / "Rscript")
 H5AD_PATH = ROOT / "OpenAccess_nfcore" / "Merged_Processed_AnnData_with_Batch_Biases_QC_Status.h5ad"
 GAMLSS_R_HELPER = ROOT / "Modeling" / "gamlss.r"
 

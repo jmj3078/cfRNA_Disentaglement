@@ -22,12 +22,8 @@ from MixedEffectsModeling.core.model_engine_mixed import NormativeModelEngineMix
 from MixedEffectsModeling.core.shash import fit_and_correct, shash_transform_to_z
 
 MP = config.SPIKE_PARAMS
-POISSON_ALPHA_EPS = 1e-8  # alpha -> 0 limit of NB reduces to Poisson; reused so PPC math needs no family branch
+POISSON_ALPHA_EPS = 1e-8  
 
-
-# Every (gene, fold) pair is recorded here regardless of convergence -- the
-# v1 CV script silently dropped non-converging folds, which hid exactly the
-# fold-level failure information this module exists to keep.
 def squeeze_fold(fits):
     """Apply the same EB dispersion-intercept squeeze the deployed engine applies,
     re-estimating tau_d from this fold's own fits so held-out Z-scores reflect the
@@ -78,7 +74,7 @@ def cv_model_route(e2, model_genes, stage_of, folds, tmp, disp_prior_path=None, 
             fit_params = Path(tmp) / "fit_params.json"
             fit_params.write_text(json.dumps(config.FIT_PARAMS))
             cmd = [
-                "Rscript", str(config.GLMM_FIT_R), "--x", f"{tmp}/X_{fi}.csv.gz", "--y", f"{tmp}/Y_{fi}.csv.gz",
+                config.RSCRIPT, str(config.GLMM_FIT_R), "--x", f"{tmp}/X_{fi}.csv.gz", "--y", f"{tmp}/Y_{fi}.csv.gz",
                 "--batch", f"{tmp}/batch_{fi}.csv.gz", "--genes", f"{tmp}/genes_{fi}.csv",
                 "--trend", str(config.DISPERSION_TREND_PATH), "--fit-params", str(fit_params),
                 "--mode", "fixed_stage", "--out", f"{tmp}/res_{fi}.csv",
@@ -182,7 +178,7 @@ def cv_pool_route(e2, genes_t, folds, tmp, cache_dir=None):
             pd.DataFrame({"gene": genes_t}).to_csv(f"{tmp}/genesp_{fi}.csv", index=False)
 
             subprocess.run([
-                "Rscript", str(config.GLMM_FIT_POOL_R), "--x", f"{tmp}/Xp_{fi}.csv.gz", "--y", f"{tmp}/Yp_{fi}.csv.gz",
+                config.RSCRIPT, str(config.GLMM_FIT_POOL_R), "--x", f"{tmp}/Xp_{fi}.csv.gz", "--y", f"{tmp}/Yp_{fi}.csv.gz",
                 "--batch", f"{tmp}/batchp_{fi}.csv.gz", "--genes", f"{tmp}/genesp_{fi}.csv",
                 "--rare-overdisp-thr", str(MP["rare_overdisp_thr"]), "--out", f"{tmp}/pool_res_{fi}.json",
             ], check=True, cwd=str(config.GLMM_FIT_POOL_R.parent))

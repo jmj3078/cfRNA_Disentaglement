@@ -7,10 +7,10 @@ import sys
 import time
 from pathlib import Path
 
+import h5py
 import numpy as np
 import pandas as pd
-import scanpy as sc
-from scipy.sparse import issparse
+from scipy.sparse import csr_matrix
 from sklearn.preprocessing import StandardScaler
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
@@ -25,29 +25,46 @@ from MixedEffectsModeling.validation.cv_engine import squeeze_fold
 MP = config.SPIKE_PARAMS
 
 
+def _decode_cat(grp):
+    codes = grp["codes"][()]
+    cats = np.array([c.decode() if isinstance(c, bytes) else c for c in grp["categories"][()]])
+    out = np.full(len(codes), "", dtype=object)
+    valid = codes >= 0
+    out[valid] = cats[codes[valid]]
+    return out
+
+
 def load_full_data(h5ad_path=config.H5AD_PATH):
     """Same QC filters as NormativeModelEngineMixed.load_hc_data, but keeps every
-    phenotype (not just HC) so held-out disease samples can be scored too."""
-    adata = sc.read_h5ad(h5ad_path)
-    adata = adata[adata.obs["QC_Passed"] == True]
-    adata = adata[adata.obs["Phenotype_Processed"].notna()]
-    adata = adata[adata.obs["Phenotype_Processed"] != "Unknown"]
-    adata = adata[adata.obs["broad_protocol_category"] != "Exome-based (EB)"]
+    phenotype (not just HC) so held-out disease samples can be scored too.
 
-    is_hc = (adata.obs["Phenotype_Processed"].astype(str) == "Healthy Control").values
-    batch = adata.obs[config.STRATIFY_COL].astype(str).values
+    Reads X + needed obs/var columns directly via h5py instead of sc.read_h5ad --
+    even backed='r' only defers X, not `layers` (~7.8GB of unused RUVg/TMM/FPKM/tpm/
+    scaled variants on this h5ad), which was OOM-ing this pipeline."""
+    with h5py.File(h5ad_path, "r") as f:
+        qc_passed = f["obs/QC_Passed"][()]
+        phenotype_full = _decode_cat(f["obs/Phenotype_Processed"])
+        protocol = _decode_cat(f["obs/broad_protocol_category"])
+        keep = qc_passed & (phenotype_full != "") & (phenotype_full != "Unknown") & (protocol != "Exome-based (EB)")
+
+        X_raw = np.column_stack([f[f"obs/{c}"][()] for c in config.BIAS_COLUMNS]).astype(np.float64)[keep]
+        names = f["obs/_index"][()].astype(str)[keep]
+        batch = _decode_cat(f[f"obs/{config.STRATIFY_COL}"])[keep]
+        phenotype = phenotype_full[keep]
+
+        shape = tuple(f["X"].attrs["shape"])
+        Xsp = csr_matrix((f["X/data"][()], f["X/indices"][()], f["X/indptr"][()]), shape=shape)
+        Y = np.round(Xsp[keep].toarray()).astype(np.float64)
+
+        gene_names_all = f["var/_index"][()].astype(str)
+        is_pc = _decode_cat(f["var/GeneType"]) == "protein_coding"
+        pc_gene_names = gene_names_all[is_pc].tolist()
+        pc_idx = np.where(is_pc)[0]
+        gene_col = {g: pc_idx[i] for i, g in enumerate(pc_gene_names)}
+
+    is_hc = phenotype == "Healthy Control"
     bsize = pd.Series(batch[is_hc]).value_counts()
     small_hc_batches = set(bsize.loc[lambda v: v < config.MIN_HC_BATCH_SIZE].index)
-
-    X_raw = adata.obs[config.BIAS_COLUMNS].values.astype(np.float64)
-    Y_raw = adata.X.toarray() if issparse(adata.X) else np.asarray(adata.X)
-    Y = np.round(Y_raw).astype(np.float64)
-    names = adata.obs_names.astype(str).values
-    is_pc = (adata.var["GeneType"] == "protein_coding").values
-    pc_gene_names = adata.var_names[is_pc].tolist()
-    pc_idx = np.where(is_pc)[0]
-    gene_col = {g: pc_idx[i] for i, g in enumerate(pc_gene_names)}
-    phenotype = adata.obs["Phenotype_Processed"].astype(str).values
     return dict(X_raw=X_raw, Y=Y, names=names, batch=batch, is_hc=is_hc, phenotype=phenotype,
                small_hc_batches=small_hc_batches, gene_col=gene_col)
 
@@ -77,7 +94,7 @@ def _refit_model_genes(tr_idx, data, genes, stage_of, scaler, tmp, disp_prior_pa
     pd.DataFrame({"gene": genes, "stage": [stage_of[g] for g in genes]}).to_csv(f"{tmp}/genes.csv", index=False)
     fit_params = Path(tmp) / "fit_params.json"
     fit_params.write_text(json.dumps(config.FIT_PARAMS))
-    cmd = ["Rscript", str(config.GLMM_FIT_R), "--x", f"{tmp}/X.csv.gz", "--y", f"{tmp}/Y.csv.gz",
+    cmd = [config.RSCRIPT, str(config.GLMM_FIT_R), "--x", f"{tmp}/X.csv.gz", "--y", f"{tmp}/Y.csv.gz",
           "--batch", f"{tmp}/batch.csv.gz", "--genes", f"{tmp}/genes.csv",
           "--trend", str(config.DISPERSION_TREND_PATH), "--fit-params", str(fit_params),
           "--mode", "fixed_stage", "--out", f"{tmp}/res.csv"]
@@ -139,7 +156,7 @@ def _refit_and_score_pool(tr_idx, te_idx, data, genes, scaler, tmp, cache_path=N
         pd.DataFrame({"Batch_ID": data["batch"][tr_idx]}).to_csv(f"{tmp}/batchp.csv.gz")
         pd.DataFrame({"gene": genes}).to_csv(f"{tmp}/genesp.csv", index=False)
         subprocess.run([
-            "Rscript", str(config.GLMM_FIT_POOL_R), "--x", f"{tmp}/Xp.csv.gz", "--y", f"{tmp}/Yp.csv.gz",
+            config.RSCRIPT, str(config.GLMM_FIT_POOL_R), "--x", f"{tmp}/Xp.csv.gz", "--y", f"{tmp}/Yp.csv.gz",
             "--batch", f"{tmp}/batchp.csv.gz", "--genes", f"{tmp}/genesp.csv",
             "--rare-overdisp-thr", str(MP["rare_overdisp_thr"]), "--out", f"{tmp}/pool_res.json",
         ], check=True, cwd=str(config.GLMM_FIT_POOL_R.parent))
