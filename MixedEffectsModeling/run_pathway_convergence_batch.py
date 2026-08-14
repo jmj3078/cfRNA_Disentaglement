@@ -10,17 +10,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import MixedEffectsModeling.config as config
 from MixedEffectsModeling.core.pathway_convergence import (
-    load_pathway_library, load_symbol_vocab, run_phenotype, slugify,
+    load_pathway_library, load_symbol_vocab, run_phenotype, run_phenotype_directional, slugify,
 )
 
 ZDIR = Path(__file__).resolve().parent / "Z_scores_mixed"
 PCDIR = config.PATHWAY_CONV_DIR
-
-# n>=20 (excluding CAD_HF+/CAD_HF-), sorted descending by n -- confirmed with user. Pancreatic Cancer
-# is included too so its output files pick up the same {phenotype}_{null,universe,sig}.pkl naming
-# as everything else, replacing the old bare Pancreatic_Cancer_null.npz-only cache.
-# ME/CFS dropped -- literature review found only one weakly-supported pathway (thin, contested
-# biomarker base), not enough for a meaningful downstream story.
 PHENOTYPES = [
     "Tuberculosis", "Pancreatitis", "Pancreatic Cancer", "Pre-eclampsia",
     "Colorectal Cancer", "Lung Cancer", "Esophagus Cancer", "Stomach Cancer",
@@ -47,7 +41,7 @@ if __name__ == "__main__":
     jobs = [(ph, ph, None) for ph in PHENOTYPES]
     jobs += [(label, "Liver Cancer", batches) for label, batches in LIVER_CANCER_STUDIES]
 
-    results = []
+    results, results_dir = [], []
     for label, phenotype, include_batches in jobs:
         print(f'--- {label} ---', flush=True)
         summary = run_phenotype(phenotype, Z, gene_names, meta, universe_syms, sym2idx, col2sym, terms, M,
@@ -60,5 +54,13 @@ if __name__ == "__main__":
               flush=True)
         results.append(summary)
 
+        summary_dir = run_phenotype_directional(phenotype, Z, gene_names, meta, universe_syms, sym2idx,
+                                                col2sym, terms, M, include_batches=include_batches, label=label)
+        print(f'  [directional] up_median={summary_dir["path_sig_up_median"]:.0f}  '
+              f'down_median={summary_dir["path_sig_down_median"]:.0f}', flush=True)
+        results_dir.append(summary_dir)
+
     pd.DataFrame(results).to_csv(PCDIR / "batch_summary.csv", index=False)
-    print("done, summary written to PathwayConvergence/batch_summary.csv", flush=True)
+    pd.DataFrame(results_dir).to_csv(PCDIR / "batch_summary_directional.csv", index=False)
+    print("done, summary written to PathwayConvergence/batch_summary.csv "
+          "and batch_summary_directional.csv", flush=True)

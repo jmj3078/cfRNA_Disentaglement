@@ -93,10 +93,20 @@ PATHWAY_CONV_PARAMS = {
     # story -- GO's fine-grained hierarchy mostly re-slices signal KEGG/Reactome already carry.
     "gene_sets": ["KEGG_2021_Human", "Reactome_2022"],
     "min_pathway_size": 5,
-    # 200 -> 800: convergence check (2 phenotypes, 2 independent seeds each) showed cross-seed
-    # reproducibility of per-patient significant-pathway sets was only ~0.75-0.78 Jaccard at 200,
-    # rising to ~0.86-0.89 at 800 (near the ~0.89 ceiling reached at 1600) -- 200 was not reproducible.
-    "n_null_perm": 800,
+    "n_null_perm": 800,  # used only by the legacy permutation-null path in 4_gene_pathway_reoccurence.ipynb
+    # per-sample gene-level cutoff feeding the pathway hypergeometric/Fisher ORA test. Method
+    # comparison (_scratch_pathway_methods/, 2026-08) benchmarked HC-population-null mean-Z,
+    # CAMERA-style PAGE, singscore, and this |Z|-threshold + Fisher ORA against a negative
+    # control (held-out HC samples scored as if they were patients, true null): singscore was
+    # badly anti-conservative (up to 14.5% of pathways "significant" in healthy controls),
+    # HC-population-null was badly batch-confounded (r=0.67 between hit count and |global
+    # sample-mean Z|, driven by 2 specific batches), CAMERA was underpowered even in real disease
+    # samples. Fisher ORA was the only one clean on the negative control (median 0 across all
+    # thresholds tested) while still detecting signal in disease samples -- adopted as the
+    # pipeline default. z_thresh=1.96 (nominal two-sided p<0.05) empirically beat looser (1.64,
+    # dilutes the enrichment ratio with background noise genes) and stricter (2.33/2.58, too few
+    # genes left for hypergeometric power) alternatives in a 4-point sweep on Tuberculosis.
+    "z_thresh": 1.96,
     "fdr_q": 0.05,
     "seed": 42,
     # Blood/cfRNA transcriptomics has a literature-recognized confound here, not just an in-house
