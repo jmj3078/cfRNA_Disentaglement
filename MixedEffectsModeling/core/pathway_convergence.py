@@ -18,6 +18,61 @@ def slugify(phenotype):
     return phenotype.strip().replace(" ", "_").replace("/", "-")
 
 
+def pairwise_overlap(masks):
+    """Jaccard + overlap-coefficient for every patient pair, given a (n_patients, n_items) bool
+    matrix. Mirrors Wolfers 2018 JAMA Psych / Segal 2023 Nat Neurosci deviation-overlap design.
+    NOTE: raw Jaccard is NOT comparable across item universes of different size (N) -- with small
+    per-patient hit counts relative to N, near-zero Jaccard is a combinatorial near-certainty
+    regardless of whether hits are real signal or noise. Use `overlap_enrichment` for a
+    size-matched-null-normalized statistic before claiming "convergence" or "heterogeneity"."""
+    inter = masks.astype(int) @ masks.astype(int).T
+    sizes = masks.sum(axis=1)
+    union = sizes[:, None] + sizes[None, :] - inter
+    jacc = np.divide(inter, union, out=np.zeros_like(inter, dtype=float), where=union > 0)
+    minsz = np.minimum(sizes[:, None], sizes[None, :])
+    ovc = np.divide(inter, minsz, out=np.zeros_like(inter, dtype=float), where=minsz > 0)
+    iu = np.triu_indices(masks.shape[0], k=1)
+    return jacc[iu], ovc[iu]
+
+
+def overlap_enrichment(masks, n_perm=200, seed=42):
+    """Size-matched-null-normalized pairwise overlap: is observed Jaccard higher than what
+    patients with the SAME per-patient hit counts would show if hits were random draws from the
+    N-item universe? Each null rep reassigns each patient's own hit count to random items
+    (independently per patient) and recomputes the pairwise Jaccard; the null distribution is
+    over per-rep MEDIAN Jaccard (matching the summary statistic reported for the observed data),
+    not over individual pairs, since ~n_pat*(n_pat-1)/2 pairs from ONE null draw are not
+    independent replicates of the null. Returns (obs_median, null_median, null_sd, enrichment_ratio,
+    perm_pvalue) -- one-sided: fraction of null-rep medians >= observed median."""
+    rng = np.random.default_rng(seed)
+    n_pat, N = masks.shape
+    sizes = masks.sum(axis=1)
+    obs_jacc, _ = pairwise_overlap(masks)
+    obs_median = np.median(obs_jacc)
+
+    null_medians = np.empty(n_perm)
+    for r in range(n_perm):
+        null_masks = np.zeros((n_pat, N), dtype=bool)
+        for i, k in enumerate(sizes):
+            if k > 0:
+                idx = rng.choice(N, size=min(int(k), N), replace=False)
+                null_masks[i, idx] = True
+        nj, _ = pairwise_overlap(null_masks)
+        null_medians[r] = np.median(nj)
+
+    null_median = null_medians.mean()
+    null_sd = null_medians.std(ddof=1)
+    if null_median > 0:
+        ratio = obs_median / null_median
+    elif obs_median > 0:
+        ratio = np.inf  # unbeatable convergence: null never produced ANY overlap, but observed did
+    else:
+        ratio = np.nan  # both zero -- truly untestable, not "no signal" in either direction
+    pval = (1 + np.sum(null_medians >= obs_median)) / (n_perm + 1)
+    return dict(obs_median=obs_median, null_median=null_median, null_sd=null_sd,
+                enrichment_ratio=ratio, perm_pvalue=pval)
+
+
 # ENSG -> gene-symbol vocabulary is phenotype-independent (fixed by the H5AD var table), cached once
 # and reused across phenotypes. Zu/Fm (the collapsed Z matrix) is NOT -- it depends on which patients
 # are in the cohort, so it's computed fresh per phenotype in collapse_to_symbols below.

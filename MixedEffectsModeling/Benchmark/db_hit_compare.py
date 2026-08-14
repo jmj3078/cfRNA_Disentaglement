@@ -23,6 +23,7 @@ DESEQ_DIR = HERE / "DESeq2"
 REF_DIR = HERE / "disease_reference"
 PC_DIR = config.PATHWAY_CONV_DIR
 NULL_DIR = HERE / "DESeq2_pathway_null"
+GSEA_DIR = HERE / "gsea_cache"
 ZDIR = config.ROOT / "MixedEffectsModeling" / "Z_scores_mixed"
 DESIGN_LABELS = {"no_covariate": "deseq2_no_cov", "covariate": "deseq2_cov",
                  "ruvg_k1": "deseq2_ruvg_k1", "ruvg_k2": "deseq2_ruvg_k2", "ruvg_k3": "deseq2_ruvg_k3"}
@@ -355,6 +356,178 @@ def final_discovery_panel(deseq2_designs=("no_covariate", "covariate")):
     return pd.DataFrame(rows).sort_values("phenotype").reset_index(drop=True)
 
 
+def matched_threshold_sweep(qs=(0.05, 0.10, 0.15, 0.20), deseq2_design="no_covariate"):
+    """Symmetric sweep: normative_union and DESeq2 (same design) at IDENTICAL q, both scored
+    against the same Open Targets reference by hypergeometric enrichment + BH-FDR across the
+    whole (method, q, phenotype) table -- tests whether the normative-vs-DESeq2 enrichment gap
+    is a q=0.05-specific artifact or holds at every threshold."""
+    import json
+    from scipy.stats import hypergeom
+    from statsmodels.stats.multitest import multipletests
+    sym_of = ensg_to_symbol()
+    sm = pd.read_csv(ZDIR / "sample_meta.csv")
+    gene_names = pickle.load(open(ZDIR / "gene_names.pkl", "rb"))
+    sym_arr = sym_of.reindex(gene_names).values
+    ref = load_reference()
+    N_genes = len(gene_names)
+    Z = np.load(ZDIR / "Z_disease_shash.npy")
+    from scipy.stats import norm
+    p_all = 2 * norm.sf(np.abs(Z))
+
+    rows = []
+    for q in qs:
+        norm_sets = {}
+        for pheno, sub in sm[sm.ood_keep].groupby("phenotype"):
+            sig_syms = set()
+            for i in sub.index:
+                row = p_all[i]
+                finite = np.isfinite(row)
+                reject = np.zeros(len(row), dtype=bool)
+                reject[finite] = bh_fdr_reject(row[finite], q=q)
+                sig_syms |= {s for s in sym_arr[reject] if pd.notna(s)}
+            norm_sets[pheno] = sig_syms
+        for pheno, sig in norm_sets.items():
+            dref = ref.get(pheno, set())
+            if not dref:
+                continue
+            K, n, x = len(dref), len(sig), len(sig & dref)
+            pval = hypergeom.sf(x - 1, N_genes, K, n) if n > 0 else np.nan
+            rows.append(dict(method="normative_union", q=q, phenotype=pheno, n_sig=n, overlap=x, ref_size=K, pval=pval))
+
+        ds = deseq2_gene_sets(deseq2_design, sym_of, alpha=q)
+        for pheno, sig in ds.items():
+            dref = ref.get(pheno, set())
+            if not dref:
+                continue
+            K, n, x = len(dref), len(sig), len(sig & dref)
+            pval = hypergeom.sf(x - 1, N_genes, K, n) if n > 0 else np.nan
+            rows.append(dict(method=f"deseq2_{deseq2_design}", q=q, phenotype=pheno, n_sig=n, overlap=x, ref_size=K, pval=pval))
+
+    df = pd.DataFrame(rows)
+    _, padj, _, _ = multipletests(df.pval.fillna(1), method="fdr_bh")
+    df["padj"] = padj
+    df["sig_fdr05"] = padj < 0.05
+    return df
+
+
+def cross_study_replication(recur_K=1):
+    """DB-independent reproducibility check: for phenotypes split across >=2 independent
+    PathwayConvergence study dirs (currently only Liver Cancer: Chen et al. vs Roskams-Hieter B
+    et al.), hypergeometric-test each pair's significant gene/pathway sets against EACH OTHER
+    (not against the Open Targets reference) -- tests whether two independent cohorts of the same
+    phenotype converge on the same signal, at gene and pathway level."""
+    from itertools import combinations
+
+    from scipy.stats import hypergeom
+    sm = pd.read_csv(ZDIR / "sample_meta.csv")
+    pc_map = pc_dirs_by_phenotype(sm)
+    gene_names = pickle.load(open(ZDIR / "gene_names.pkl", "rb"))
+    N_genes = len(gene_names)
+
+    rows = []
+    for pheno, pdirs in pc_map.items():
+        if len(pdirs) < 2:
+            continue
+        reps = []
+        for pdir in pdirs:
+            d = pickle.load(open(pdir / "sig.pkl", "rb"))
+            gene_idx = set(np.where(d["gene_sig"].sum(axis=0) >= recur_K)[0].tolist())
+            path_idx = set(np.where(d["path_sig"].sum(axis=0) >= recur_K)[0].tolist())
+            reps.append(dict(study=pdir.name, n_terms=len(d["terms"]), n_pat=d["gene_sig"].shape[0],
+                              gene_idx=gene_idx, path_idx=path_idx))
+        for a, b in combinations(reps, 2):
+            for level, N, key in (("gene", N_genes, "gene_idx"), ("pathway", a["n_terms"], "path_idx")):
+                sa, sb = a[key], b[key]
+                K, n, x = len(sa), len(sb), len(sa & sb)
+                pval = hypergeom.sf(x - 1, N, K, n) if (K and n) else np.nan
+                rows.append(dict(phenotype=pheno, level=level, study_a=a["study"], study_b=b["study"],
+                                  n_pat_a=a["n_pat"], n_pat_b=b["n_pat"], n_a=K, n_b=n, overlap=x,
+                                  N_universe=N, pval=pval))
+    return pd.DataFrame(rows)
+
+
+def stouffer_group_z(sm=None, Z=None, gene_names=None, min_n=3):
+    """{(phenotype, study): (n_genes,) array} -- Stouffer's Z (sum(Z)/sqrt(n_finite)) per gene,
+    combining per-patient calibrated Z-scores into ONE group-level statistic per gene, analogous to
+    DESeq2's per-gene Wald stat. Valid because SHASH calibration targets Z~N(0,1) under the null for
+    every patient independently (Stouffer 1949 meta-analytic combination of independent Z-scores).
+    Grouped by (phenotype, study) -- NOT phenotype alone -- because Liver Cancer pools 3 technically
+    distinct studies (Chen/Roskams-Hieter B/Block, same confound PathwayConvergence splits out via
+    per-study sig.pkl dirs, see run_pathway_convergence_batch.py); pooling them would mix each
+    study's own technical variance into a single ranking statistic. min_n=3 drops Block et al.
+    (n=2), too small for a group statistic (same threshold as PathwayConvergence)."""
+    if Z is None:
+        Z = np.load(ZDIR / "Z_disease_shash.npy")
+    if sm is None:
+        sm = pd.read_csv(ZDIR / "sample_meta.csv")
+    sm = sm.copy()
+    sm["study"] = sm["batch"].str.replace(r"_Batch_\d+$", "", regex=True)
+    out = {}
+    for (pheno, study), sub in sm[sm.ood_keep].groupby(["phenotype", "study"]):
+        if len(sub) < min_n:
+            continue
+        Zc = Z[sub.index.values]
+        finite = np.isfinite(Zc)
+        n = finite.sum(axis=0)
+        s = np.where(finite, Zc, 0.0).sum(axis=0)
+        gz = np.divide(s, np.sqrt(n), out=np.full(n.shape, np.nan), where=n > 0)
+        out[(pheno, study)] = gz
+    return out
+
+
+def group_level_z_test(qs=(0.05, 0.10, 0.15, 0.20), deseq2_design="no_covariate"):
+    """Apples-to-apples group-level comparison (Rutherford 2023 eLife design): the SAME per-gene
+    univariate-test -> BH-FDR -> hypergeometric-vs-OT pipeline DESeq2 uses, fed normative Z-scores
+    (combined across patients via Stouffer's Z) instead of raw counts -- isolates whether deviation
+    scores carry more disease signal than raw counts at the SAME statistical unit (one p-value per
+    gene, group-level), avoiding the K=1-union across-patient min-p problem of normative_union."""
+    from scipy.stats import hypergeom, norm
+    from statsmodels.stats.multitest import multipletests
+    sym_of = ensg_to_symbol()
+    sm = pd.read_csv(ZDIR / "sample_meta.csv")
+    gene_names = pickle.load(open(ZDIR / "gene_names.pkl", "rb"))
+    sym_arr = sym_of.reindex(gene_names).values
+    ref = load_reference()
+    N_genes = len(gene_names)
+    Z = np.load(ZDIR / "Z_disease_shash.npy")
+    group_z = stouffer_group_z(sm, Z, gene_names)
+
+    rows = []
+    for q in qs:
+        norm_sets = {}
+        for (pheno, study), gz in group_z.items():
+            finite = np.isfinite(gz)
+            p = np.full(len(gz), np.nan)
+            p[finite] = 2 * norm.sf(np.abs(gz[finite]))
+            reject = np.zeros(len(gz), dtype=bool)
+            reject[finite] = bh_fdr_reject(p[finite], q=q)
+            sig = {s for s in sym_arr[reject] if pd.notna(s)}
+            norm_sets.setdefault(pheno, set()).update(sig)  # union across studies, same convention as deseq2_gene_sets
+
+        for pheno, sig in norm_sets.items():
+            dref = ref.get(pheno, set())
+            if not dref:
+                continue
+            K, n, x = len(dref), len(sig), len(sig & dref)
+            pval = hypergeom.sf(x - 1, N_genes, K, n) if n > 0 else np.nan
+            rows.append(dict(method="normative_group_z", q=q, phenotype=pheno, n_sig=n, overlap=x, ref_size=K, pval=pval))
+
+        ds = deseq2_gene_sets(deseq2_design, sym_of, alpha=q)
+        for pheno, sig in ds.items():
+            dref = ref.get(pheno, set())
+            if not dref:
+                continue
+            K, n, x = len(dref), len(sig), len(sig & dref)
+            pval = hypergeom.sf(x - 1, N_genes, K, n) if n > 0 else np.nan
+            rows.append(dict(method=f"deseq2_{deseq2_design}", q=q, phenotype=pheno, n_sig=n, overlap=x, ref_size=K, pval=pval))
+
+    df = pd.DataFrame(rows)
+    _, padj, _, _ = multipletests(df.pval.fillna(1), method="fdr_bh")
+    df["padj"] = padj
+    df["sig_fdr05"] = padj < 0.05
+    return df
+
+
 def db_hit_row(phenotype, method, sig_set, ref):
     dref = ref.get(phenotype, set())
     n_sig, n_db = len(sig_set), len(sig_set & dref)
@@ -534,4 +707,96 @@ def pathway_level_db_hits(save=True, designs=("no_covariate", "covariate", "ruvg
     rates = pd.DataFrame(rows)
     if save:
         rates.to_csv(HERE / "pathway_db_hit_rates.csv", index=False)
+    return rates
+
+
+# --- group-level pathway comparison via real preranked GSEA (Subramanian 2005), replacing the
+# ad hoc mean-Z + gene-label-permutation scorer above with the standard weighted running-sum
+# algorithm -- possible now that both methods produce ONE group-level ranking statistic per gene
+# (Stouffer Z for normative, Wald stat for DESeq2), the same apples-to-apples design as
+# group_level_z_test at gene level.
+
+def gsea_prerank(rnk, terms, M, universe_syms, n_perm=1000, seed=42, min_size=5, max_size=1000,
+                 threads=8):
+    """Standard preranked GSEA on a gene-symbol -> score ranking, using the SAME KEGG+Reactome
+    housekeeping-filtered library as PathwayConvergence (`load_pathway_library`). Returns gseapy's
+    res2d (Term, NES, FDR q-val, ...)."""
+    import gseapy as gp
+    gene_sets = {t: [universe_syms[j] for j in np.where(M[ti])[0]] for ti, t in enumerate(terms)}
+    rnk_s = pd.Series(rnk, index=universe_syms).dropna().sort_values(ascending=False)
+    res = gp.prerank(rnk=rnk_s, gene_sets=gene_sets, min_size=min_size, max_size=max_size,
+                     permutation_num=n_perm, seed=seed, outdir=None, no_plot=True, threads=threads)
+    return res.res2d
+
+
+def _cached_gsea(cache_key, rnk, terms, M, universe_syms, **kw):
+    GSEA_DIR.mkdir(parents=True, exist_ok=True)
+    path = GSEA_DIR / f"{slugify(cache_key)}.csv"
+    if path.exists():
+        return pd.read_csv(path)
+    res2d = gsea_prerank(rnk, terms, M, universe_syms, **kw)
+    res2d.to_csv(path, index=False)
+    return res2d
+
+
+def group_level_pathway_gsea(save=True, deseq2_design="no_covariate", gsea_qs=(0.05, 0.25)):
+    """Pathway-level apples-to-apples: preranked GSEA on group Stouffer Z (normative) vs DESeq2
+    Wald stat, same library, same algorithm. Reports hit-rate vs the Open Targets reference
+    pathway set (`reference_pathways`, hypergeometric ORA on the DB gene list itself) at GSEA's own
+    q<0.05 confirmatory / q<0.25 discovery tiers (Subramanian 2005 convention, see
+    FDR_THRESHOLD_RATIONALE.md)."""
+    universe_syms, sym2idx, col2sym = load_symbol_vocab(None)
+    terms, M = load_pathway_library()
+    N = len(universe_syms)
+    ref = load_reference()
+    ref_path = {ph: reference_pathways(syms, sym2idx, terms, M) for ph, syms in ref.items()}
+
+    sm = pd.read_csv(ZDIR / "sample_meta.csv")
+    gene_names = pickle.load(open(ZDIR / "gene_names.pkl", "rb"))
+    Z = np.load(ZDIR / "Z_disease_shash.npy")
+    group_z = stouffer_group_z(sm, Z, gene_names)
+
+    rows = []
+    norm_by_q = {}
+    for (pheno, study), gz in group_z.items():
+        Zu, Fm = collapse_to_symbols(gz[None, :], col2sym, N)
+        rnk = np.where(Fm[0] > 0, Zu[0], np.nan)
+        res2d = _cached_gsea(f"normative__{pheno}__{study}", rnk, terms, M, universe_syms)
+        for q in gsea_qs:
+            sig = set(res2d.loc[res2d["FDR q-val"] < q, "Term"])
+            norm_by_q.setdefault((pheno, q), set()).update(sig)  # union across studies
+
+    for (pheno, q), sig in norm_by_q.items():
+        label = "normative_group_gsea" if q == 0.05 else f"normative_group_gsea_q{q:g}".replace(".", "")
+        rows.append(db_hit_row(pheno, label, sig, ref_path))
+
+    sym_of = ensg_to_symbol()
+    sym_of.index = sym_of.index.str.split(".").str[0]
+    summary = pd.read_csv(DESEQ_DIR / "summary.csv")
+    summary = summary[summary.design == deseq2_design]
+    for pheno, sub in summary.groupby("phenotype"):
+        by_q = {q: set() for q in gsea_qs}
+        for _, r in sub.iterrows():
+            path = DESEQ_DIR / deseq2_design / f"{deseq2_tag(r.study, pheno)}.csv"
+            if not path.exists():
+                continue
+            res = pd.read_csv(path, index_col=0)
+            res.index = res.index.str.split(".").str[0]
+            stat = res["stat"].dropna()
+            syms = sym_of.reindex(stat.index)
+            rnk_df = pd.Series(stat.values, index=syms.values)
+            rnk_df = rnk_df[pd.notna(rnk_df.index)].groupby(level=0).mean().reindex(universe_syms)
+            res2d = _cached_gsea(f"{deseq2_design}__{deseq2_tag(r.study, pheno)}", rnk_df.values,
+                                 terms, M, universe_syms)
+            for q in gsea_qs:
+                by_q[q] |= set(res2d.loc[res2d["FDR q-val"] < q, "Term"])
+        if sub.shape[0]:
+            for q in gsea_qs:
+                label = f"{DESIGN_LABELS[deseq2_design]}_gsea" if q == 0.05 else \
+                    f"{DESIGN_LABELS[deseq2_design]}_gsea_q{q:g}".replace(".", "")
+                rows.append(db_hit_row(pheno, label, by_q[q], ref_path))
+
+    rates = pd.DataFrame(rows)
+    if save:
+        rates.to_csv(HERE / "pathway_gsea_db_hit_rates.csv", index=False)
     return rates
