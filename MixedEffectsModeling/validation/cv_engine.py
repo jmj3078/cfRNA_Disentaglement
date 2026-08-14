@@ -19,7 +19,7 @@ from MixedEffectsModeling.core.marginal_rqr import (
     _poisson_rqr, marginal_nb_loglik, marginal_nb_rqr, nb_marginal_mean_var, nb_marginal_pmf0,
 )
 from MixedEffectsModeling.core.model_engine_mixed import NormativeModelEngineMixed
-from MixedEffectsModeling.core.shash import fit_and_correct
+from MixedEffectsModeling.core.shash import fit_and_correct, shash_transform_to_z
 
 MP = config.SPIKE_PARAMS
 POISSON_ALPHA_EPS = 1e-8  # alpha -> 0 limit of NB reduces to Poisson; reused so PPC math needs no family branch
@@ -54,31 +54,49 @@ def _mu_alpha(Xa, mu_coef, disp_coef, row, alpha_fn):
     return mu, alpha
 
 
-def cv_model_route(e2, model_genes, stage_of, folds, tmp, disp_prior_path=None):
+def cv_model_route(e2, model_genes, stage_of, folds, tmp, disp_prior_path=None, cache_dir=None):
+    """cache_dir, if given, persists each fold's post-squeeze GLMM fit
+    (model_fold{fi}.csv) and per-gene train-fit SHASH params
+    (shash_model_fold{fi}.csv) -- both the expensive R refit and the SHASH fit
+    are skipped on a rerun if their cache file is already there, so a future
+    "SHASH-only" pass never needs Rscript again."""
     if not model_genes:
         return {}, {}, {}, []
-    rows, fold_stat_rows = [], []
+    rows, fold_stat_rows, shash_rows = [], [], []
     for fi, (tr, te) in enumerate(folds):
         scaler = StandardScaler().fit(e2.X_hc_raw[tr])
-        pd.DataFrame(scaler.transform(e2.X_hc_raw[tr]), columns=config.BIAS_COLUMNS).to_csv(f"{tmp}/X_{fi}.csv.gz")
-        Y_tr = e2.Y_hc[tr][:, [e2._gene_col[g] for g in model_genes]]
-        pd.DataFrame(Y_tr, columns=model_genes).to_csv(f"{tmp}/Y_{fi}.csv.gz")
-        pd.DataFrame({"Batch_ID": e2.batch[tr]}).to_csv(f"{tmp}/batch_{fi}.csv.gz")
-        pd.DataFrame({"gene": model_genes, "stage": [stage_of[g] for g in model_genes]}).to_csv(
-            f"{tmp}/genes_{fi}.csv", index=False)
-        fit_params = Path(tmp) / "fit_params.json"
-        fit_params.write_text(json.dumps(config.FIT_PARAMS))
-        cmd = [
-            "Rscript", str(config.GLMM_FIT_R), "--x", f"{tmp}/X_{fi}.csv.gz", "--y", f"{tmp}/Y_{fi}.csv.gz",
-            "--batch", f"{tmp}/batch_{fi}.csv.gz", "--genes", f"{tmp}/genes_{fi}.csv",
-            "--trend", str(config.DISPERSION_TREND_PATH), "--fit-params", str(fit_params),
-            "--mode", "fixed_stage", "--out", f"{tmp}/res_{fi}.csv",
-        ]
-        if disp_prior_path is not None:
-            cmd += ["--disp-prior", str(disp_prior_path)]
-        subprocess.run(cmd, check=True, cwd=str(config.GLMM_FIT_R.parent))
+        cache_path = cache_dir / f"model_fold{fi}.csv" if cache_dir else None
+        if cache_path and cache_path.exists():
+            fold_fits = pd.read_csv(cache_path).set_index("gene")
+        else:
+            pd.DataFrame(scaler.transform(e2.X_hc_raw[tr]), columns=config.BIAS_COLUMNS).to_csv(f"{tmp}/X_{fi}.csv.gz")
+            Y_tr = e2.Y_hc[tr][:, [e2._gene_col[g] for g in model_genes]]
+            pd.DataFrame(Y_tr, columns=model_genes).to_csv(f"{tmp}/Y_{fi}.csv.gz")
+            pd.DataFrame({"Batch_ID": e2.batch[tr]}).to_csv(f"{tmp}/batch_{fi}.csv.gz")
+            pd.DataFrame({"gene": model_genes, "stage": [stage_of[g] for g in model_genes]}).to_csv(
+                f"{tmp}/genes_{fi}.csv", index=False)
+            fit_params = Path(tmp) / "fit_params.json"
+            fit_params.write_text(json.dumps(config.FIT_PARAMS))
+            cmd = [
+                "Rscript", str(config.GLMM_FIT_R), "--x", f"{tmp}/X_{fi}.csv.gz", "--y", f"{tmp}/Y_{fi}.csv.gz",
+                "--batch", f"{tmp}/batch_{fi}.csv.gz", "--genes", f"{tmp}/genes_{fi}.csv",
+                "--trend", str(config.DISPERSION_TREND_PATH), "--fit-params", str(fit_params),
+                "--mode", "fixed_stage", "--out", f"{tmp}/res_{fi}.csv",
+            ]
+            if disp_prior_path is not None:
+                cmd += ["--disp-prior", str(disp_prior_path)]
+            subprocess.run(cmd, check=True, cwd=str(config.GLMM_FIT_R.parent))
 
-        fold_fits = squeeze_fold(pd.read_csv(f"{tmp}/res_{fi}.csv").set_index("gene"))
+            fold_fits = squeeze_fold(pd.read_csv(f"{tmp}/res_{fi}.csv").set_index("gene"))
+            if cache_path:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                fold_fits.to_csv(cache_path)
+
+        shash_cache_path = cache_dir / f"shash_model_fold{fi}.csv" if cache_dir else None
+        shash_cached = (pd.read_csv(shash_cache_path).set_index("gene")
+                       if shash_cache_path and shash_cache_path.exists() else None)
+        fold_shash_rows = []
+
         Xa_tr = np.column_stack([np.ones(len(tr)), scaler.transform(e2.X_hc_raw[tr])])
         Xa_te = np.column_stack([np.ones(len(te)), scaler.transform(e2.X_hc_raw[te])])
         for g in model_genes:
@@ -105,9 +123,25 @@ def cv_model_route(e2, model_genes, stage_of, folds, tmp, disp_prior_path=None):
             y_tr = e2.Y_hc[tr, e2._gene_col[g]]
             z_te = marginal_nb_rqr(y_te, mu_te, alpha_te, tau2, seed=42 + fi)
             z_tr = marginal_nb_rqr(y_tr, mu_tr, alpha_tr, tau2, seed=1042 + fi)
+
+            # SHASH: fit on this fold's TRAIN Z only, applied to this fold's held-out Z --
+            # cached per (fold, gene) so a future SHASH-only rerun needs neither R nor a refit here.
+            if shash_cached is not None and g in shash_cached.index:
+                srow = shash_cached.loc[g]
+                sok, sxi, seta, seps, sdelta = bool(srow["ok"]), srow["xi"], srow["eta"], srow["eps"], srow["delta"]
+                z_te_corr = shash_transform_to_z(z_te, sxi, seta, seps, sdelta) if sok else z_te.copy()
+            else:
+                params, z_te_corr = fit_and_correct(z_tr, z_te)
+                sok, sxi, seta, seps, sdelta = params["ok"], params["xi"], params["eta"], params["eps"], params["delta"]
+                fold_shash_rows.append(dict(gene=g, ok=sok, xi=sxi, eta=seta, eps=seps, delta=sdelta))
+
             rows.append(dict(gene=g, fold=fi, y=y_te.astype(np.float32), mu=mu_te.astype(np.float32),
                              alpha=np.asarray(alpha_te, dtype=np.float32),
-                             tau2=np.full(len(te), tau2, dtype=np.float32), z=z_te, z_train=z_tr))
+                             tau2=np.full(len(te), tau2, dtype=np.float32), z=z_te, z_corr=z_te_corr))
+
+        if shash_cache_path and fold_shash_rows:
+            shash_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(fold_shash_rows).to_csv(shash_cache_path, index=False)
 
     zdict, zdict_corr, ppc_dict = {}, {}, {}
     for g in model_genes:
@@ -115,8 +149,7 @@ def cv_model_route(e2, model_genes, stage_of, folds, tmp, disp_prior_path=None):
         if not grecs:
             continue
         zdict[g] = np.concatenate([r["z"] for r in grecs])
-        # per-fold: SHASH fit on that fold's TRAIN Z only, applied to that fold's held-out Z
-        zdict_corr[g] = np.concatenate([fit_and_correct(r["z_train"], r["z"])[1] for r in grecs])
+        zdict_corr[g] = np.concatenate([r["z_corr"] for r in grecs])
         ppc_dict[g] = dict(
             y=np.concatenate([r["y"] for r in grecs]),
             mu=np.concatenate([r["mu"] for r in grecs]),
@@ -128,26 +161,39 @@ def cv_model_route(e2, model_genes, stage_of, folds, tmp, disp_prior_path=None):
 
 # Shared-beta pooled GLM CV -- one fit per fold across all pool-route genes at once,
 # so fold_stats here are per-fold (fit succeeded or not for the whole bundle), not per-gene.
-def cv_pool_route(e2, genes_t, folds, tmp):
+def cv_pool_route(e2, genes_t, folds, tmp, cache_dir=None):
+    """cache_dir persists each fold's pooled-GLM fit (pool_fold{fi}.json) and
+    per-gene train-fit SHASH params (shash_pool_fold{fi}.csv) -- same
+    cache-first contract as cv_model_route."""
     if not genes_t:
         return {}, {}, {}, []
     rows, fold_stats = [], []
     for fi, (tr, te) in enumerate(folds):
         scaler = StandardScaler().fit(e2.X_hc_raw[tr])
-        pd.DataFrame(scaler.transform(e2.X_hc_raw[tr]), columns=config.BIAS_COLUMNS).to_csv(f"{tmp}/Xp_{fi}.csv.gz")
-        Y_tr = e2.Y_hc[tr][:, [e2._gene_col[g] for g in genes_t]]
-        pd.DataFrame(Y_tr, columns=genes_t).to_csv(f"{tmp}/Yp_{fi}.csv.gz")
-        pd.DataFrame({"Batch_ID": e2.batch[tr]}).to_csv(f"{tmp}/batchp_{fi}.csv.gz")
-        pd.DataFrame({"gene": genes_t}).to_csv(f"{tmp}/genesp_{fi}.csv", index=False)
+        cache_path = cache_dir / f"pool_fold{fi}.json" if cache_dir else None
+        if cache_path and cache_path.exists():
+            with open(cache_path) as f:
+                fit = json.load(f)
+        else:
+            pd.DataFrame(scaler.transform(e2.X_hc_raw[tr]), columns=config.BIAS_COLUMNS).to_csv(f"{tmp}/Xp_{fi}.csv.gz")
+            Y_tr = e2.Y_hc[tr][:, [e2._gene_col[g] for g in genes_t]]
+            pd.DataFrame(Y_tr, columns=genes_t).to_csv(f"{tmp}/Yp_{fi}.csv.gz")
+            pd.DataFrame({"Batch_ID": e2.batch[tr]}).to_csv(f"{tmp}/batchp_{fi}.csv.gz")
+            pd.DataFrame({"gene": genes_t}).to_csv(f"{tmp}/genesp_{fi}.csv", index=False)
 
-        subprocess.run([
-            "Rscript", str(config.GLMM_FIT_POOL_R), "--x", f"{tmp}/Xp_{fi}.csv.gz", "--y", f"{tmp}/Yp_{fi}.csv.gz",
-            "--batch", f"{tmp}/batchp_{fi}.csv.gz", "--genes", f"{tmp}/genesp_{fi}.csv",
-            "--rare-overdisp-thr", str(MP["rare_overdisp_thr"]), "--out", f"{tmp}/pool_res_{fi}.json",
-        ], check=True, cwd=str(config.GLMM_FIT_POOL_R.parent))
+            subprocess.run([
+                "Rscript", str(config.GLMM_FIT_POOL_R), "--x", f"{tmp}/Xp_{fi}.csv.gz", "--y", f"{tmp}/Yp_{fi}.csv.gz",
+                "--batch", f"{tmp}/batchp_{fi}.csv.gz", "--genes", f"{tmp}/genesp_{fi}.csv",
+                "--rare-overdisp-thr", str(MP["rare_overdisp_thr"]), "--out", f"{tmp}/pool_res_{fi}.json",
+            ], check=True, cwd=str(config.GLMM_FIT_POOL_R.parent))
 
-        with open(f"{tmp}/pool_res_{fi}.json") as f:
-            fit = json.load(f)
+            with open(f"{tmp}/pool_res_{fi}.json") as f:
+                fit = json.load(f)
+            if cache_path:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(cache_path, "w") as f:
+                    json.dump(fit, f)
+
         if not fit["ok"]:
             fold_stats.append(dict(fold=fi, ok=False, family=None, fail_reason="pooled_glmm_fit_error"))
             continue
@@ -166,6 +212,11 @@ def cv_pool_route(e2, genes_t, folds, tmp):
             mult_tr = np.clip(mult_tr, fit["mult_lo"], fit["mult_hi"])
             mult_te = np.clip(mult_te, fit["mult_lo"], fit["mult_hi"])
 
+        shash_cache_path = cache_dir / f"shash_pool_fold{fi}.csv" if cache_dir else None
+        shash_cached = (pd.read_csv(shash_cache_path).set_index("gene")
+                       if shash_cache_path and shash_cache_path.exists() else None)
+        fold_shash_rows = []
+
         rqr = _poisson_rqr if fit["family"] == "poisson" else lambda y, mu, seed: marginal_nb_rqr(y, mu, alpha_eff, tau2, seed=seed)
         for g in genes_t:
             mu_te = np.clip((mean_hc[g] + eps) * np.exp(beta[0]) * mult_te, 1e-6, 1e8)
@@ -174,8 +225,22 @@ def cv_pool_route(e2, genes_t, folds, tmp):
             y_tr = e2.Y_hc[tr, e2._gene_col[g]].astype(np.float64)
             z_te = rqr(y_te, mu_te, 42 + fi)
             z_tr = rqr(y_tr, mu_tr, 1042 + fi)
-            rows.append(dict(gene=g, z=z_te, z_train=z_tr, y=y_te, mu=mu_te,
+
+            if shash_cached is not None and g in shash_cached.index:
+                srow = shash_cached.loc[g]
+                sok, sxi, seta, seps, sdelta = bool(srow["ok"]), srow["xi"], srow["eta"], srow["eps"], srow["delta"]
+                z_te_corr = shash_transform_to_z(z_te, sxi, seta, seps, sdelta) if sok else z_te.copy()
+            else:
+                params, z_te_corr = fit_and_correct(z_tr, z_te)
+                sok, sxi, seta, seps, sdelta = params["ok"], params["xi"], params["eta"], params["eps"], params["delta"]
+                fold_shash_rows.append(dict(gene=g, ok=sok, xi=sxi, eta=seta, eps=seps, delta=sdelta))
+
+            rows.append(dict(gene=g, z=z_te, z_corr=z_te_corr, y=y_te, mu=mu_te,
                              alpha=np.full_like(mu_te, alpha_eff), tau2=np.full_like(mu_te, tau2)))
+
+        if shash_cache_path and fold_shash_rows:
+            shash_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(fold_shash_rows).to_csv(shash_cache_path, index=False)
 
     zdict, zdict_corr, ppc_dict = {}, {}, {}
     for g in genes_t:
@@ -183,7 +248,7 @@ def cv_pool_route(e2, genes_t, folds, tmp):
         if not grecs:
             continue
         zdict[g] = np.concatenate([r["z"] for r in grecs])
-        zdict_corr[g] = np.concatenate([fit_and_correct(r["z_train"], r["z"])[1] for r in grecs])
+        zdict_corr[g] = np.concatenate([r["z_corr"] for r in grecs])
         ppc_dict[g] = dict(
             y=np.concatenate([r["y"] for r in grecs]), mu=np.concatenate([r["mu"] for r in grecs]),
             alpha=np.concatenate([r["alpha"] for r in grecs]), tau2=np.concatenate([r["tau2"] for r in grecs]),
@@ -249,10 +314,12 @@ def main():
 
     tmp = "/tmp/cv_glmm_v2"
     Path(tmp).mkdir(exist_ok=True)
+    cache_dir = out_dir / "fold_params"
 
     print(f"CV: {len(model_genes)} model-route genes, {len(pool_genes)} pool-route genes")
-    zdict_m, zcorr_m, ppc_dict_m, fold_stat_rows = cv_model_route(e2, model_genes, stage_of, folds, tmp, disp_prior_path)
-    zdict_p, zcorr_p, ppc_dict_p, pool_fold_stats = cv_pool_route(e2, pool_genes, folds, tmp)
+    zdict_m, zcorr_m, ppc_dict_m, fold_stat_rows = cv_model_route(
+        e2, model_genes, stage_of, folds, tmp, disp_prior_path, cache_dir=cache_dir)
+    zdict_p, zcorr_p, ppc_dict_p, pool_fold_stats = cv_pool_route(e2, pool_genes, folds, tmp, cache_dir=cache_dir)
     zdict = {**zdict_m, **zdict_p}
     zdict_corr = {**zcorr_m, **zcorr_p}
     ppc_dict = {**ppc_dict_m, **ppc_dict_p}
