@@ -1,7 +1,9 @@
+import csv
 import json
 import pickle
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -293,34 +295,97 @@ class NormativeModelEngineMixed:
             rec = self.genes[g]
             rec.mean_hc, rec.ok, rec.stage = float(m), True, "pool"
 
-    def fit_shash(self, seed=42):
+    SHASH_PROGRESS_FIELDS = [
+        "gene", "cv_shash_ok", "cv_shash_xi", "cv_shash_eta", "cv_shash_eps", "cv_shash_delta",
+        "cv_shash_z_lo", "cv_shash_z_hi", "cv_raw_skew", "cv_raw_kurtosis",
+        "cv_corrected_skew", "cv_corrected_kurtosis", "cv_naive_exceed", "cv_shash_exceed",
+        "cv_naive_fdr_reject_rate", "cv_corr_fdr_reject_rate",
+    ]
+
+    def _set_shash_fields(self, rec, calib):
+        rec.cv_shash_ok, rec.cv_shash_xi = calib["cv_shash_ok"], calib["cv_shash_xi"]
+        rec.cv_shash_eta, rec.cv_shash_eps = calib["cv_shash_eta"], calib["cv_shash_eps"]
+        rec.cv_shash_delta = calib["cv_shash_delta"]
+        rec.cv_shash_z_lo, rec.cv_shash_z_hi = calib["cv_shash_z_lo"], calib["cv_shash_z_hi"]
+        rec.cv_raw_skew, rec.cv_raw_kurtosis = calib["cv_raw_skew"], calib["cv_raw_kurtosis"]
+        rec.cv_corrected_skew, rec.cv_corrected_kurtosis = calib["cv_corrected_skew"], calib["cv_corrected_kurtosis"]
+        rec.cv_naive_exceed, rec.cv_shash_exceed = calib["cv_naive_exceed"], calib["cv_shash_exceed"]
+        rec.cv_naive_fdr_reject_rate = calib["cv_naive_fdr_reject_rate"]
+        rec.cv_corr_fdr_reject_rate = calib["cv_corr_fdr_reject_rate"]
+
+    def fit_shash(self, seed=42, progress_path=None, log_every=200):
         """Per-gene SHASH fit on THIS engine's own in-sample HC Z (scored under
         the params just trained above) -- the production null that disease Z
         is corrected against downstream. Deliberately in-sample: CV/LOBO exist
         to validate that this train-fit transform generalizes to genuinely
         held-out HC, not to supply the production params themselves (fitting
         on held-out Z here would mean the params never face a held-out check
-        at all -- see validation/cv_engine.py, validation/lobo_engine.py)."""
+        at all -- see validation/cv_engine.py, validation/lobo_engine.py).
+
+        progress_path, if given, appends each gene's fit to a CSV the moment
+        it's done (flushed immediately -- watchable with `tail -f`) and, on a
+        rerun, skips genes already in that file instead of re-fitting them --
+        this loop is ~19k independent Nelder-Mead calls with no other cheap
+        checkpoint, so an interrupted run would otherwise lose all progress."""
         gene_names = [g for g, r in self.genes.items() if r.ok]
         if not gene_names:
             return
         Z = self.score(self.X_hc_raw, self.Y_hc, gene_names=gene_names, seed=seed)
-        for j, g in enumerate(gene_names):
-            z = Z[:, j]
-            z = z[np.isfinite(z)]
-            if len(z) < 8:
-                continue
-            calib = gene_shash_calibration(z)
-            rec = self.genes[g]
-            rec.cv_shash_ok, rec.cv_shash_xi = calib["shash_ok"], calib["shash_xi"]
-            rec.cv_shash_eta, rec.cv_shash_eps = calib["shash_eta"], calib["shash_eps"]
-            rec.cv_shash_delta = calib["shash_delta"]
-            rec.cv_shash_z_lo, rec.cv_shash_z_hi = calib["z_lo"], calib["z_hi"]
-            rec.cv_raw_skew, rec.cv_raw_kurtosis = calib["raw_skew"], calib["raw_kurtosis"]
-            rec.cv_corrected_skew, rec.cv_corrected_kurtosis = calib["corrected_skew"], calib["corrected_kurtosis"]
-            rec.cv_naive_exceed, rec.cv_shash_exceed = calib["naive_exceed"], calib["shash_exceed"]
-            rec.cv_naive_fdr_reject_rate = calib["naive_fdr_reject_rate"]
-            rec.cv_corr_fdr_reject_rate = calib["corr_fdr_reject_rate"]
+
+        done = set()
+        if progress_path and Path(progress_path).exists():
+            prev = pd.read_csv(progress_path)
+            for _, prow in prev.iterrows():
+                g = prow["gene"]
+                done.add(g)
+                rec = self.genes.get(g)
+                if rec is not None:
+                    self._set_shash_fields(rec, prow.to_dict())
+            print(f"fit_shash: resuming, {len(done)}/{len(gene_names)} genes already in {progress_path}", flush=True)
+
+        f = writer = None
+        if progress_path:
+            progress_path = Path(progress_path)
+            progress_path.parent.mkdir(parents=True, exist_ok=True)
+            write_header = not (progress_path.exists() and progress_path.stat().st_size > 0)
+            f = open(progress_path, "a", newline="")
+            writer = csv.DictWriter(f, fieldnames=self.SHASH_PROGRESS_FIELDS)
+            if write_header:
+                writer.writeheader()
+
+        t0 = time.time()
+        n_done, n_todo = len(done), len(gene_names) - len(done)
+        try:
+            for j, g in enumerate(gene_names):
+                if g in done:
+                    continue
+                z = Z[:, j]
+                z = z[np.isfinite(z)]
+                if len(z) < 8:
+                    continue
+                fit = gene_shash_calibration(z)
+                row = dict(gene=g, cv_shash_ok=fit["shash_ok"], cv_shash_xi=fit["shash_xi"],
+                          cv_shash_eta=fit["shash_eta"], cv_shash_eps=fit["shash_eps"],
+                          cv_shash_delta=fit["shash_delta"], cv_shash_z_lo=fit["z_lo"], cv_shash_z_hi=fit["z_hi"],
+                          cv_raw_skew=fit["raw_skew"], cv_raw_kurtosis=fit["raw_kurtosis"],
+                          cv_corrected_skew=fit["corrected_skew"], cv_corrected_kurtosis=fit["corrected_kurtosis"],
+                          cv_naive_exceed=fit["naive_exceed"], cv_shash_exceed=fit["shash_exceed"],
+                          cv_naive_fdr_reject_rate=fit["naive_fdr_reject_rate"],
+                          cv_corr_fdr_reject_rate=fit["corr_fdr_reject_rate"])
+                self._set_shash_fields(self.genes[g], row)
+                if writer:
+                    writer.writerow(row)
+                    f.flush()
+                n_done += 1
+                if log_every and (n_done % log_every == 0 or n_done == len(gene_names)):
+                    elapsed = time.time() - t0
+                    rate = (n_done - len(done)) / max(elapsed, 1e-9)
+                    eta_s = (len(gene_names) - n_done) / rate if rate > 0 else float("nan")
+                    print(f"fit_shash: {n_done}/{len(gene_names)} ({100 * n_done / len(gene_names):.1f}%) "
+                         f"elapsed={elapsed:.0f}s rate={rate:.1f} genes/s eta={eta_s:.0f}s", flush=True)
+        finally:
+            if f:
+                f.close()
 
     def training_summary(self):
         rows = [dict(gene=r.name, route=r.route, stage=r.stage, nz=r.nz, ok=r.ok,
