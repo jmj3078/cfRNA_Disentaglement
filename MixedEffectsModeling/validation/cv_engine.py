@@ -12,16 +12,16 @@ from sklearn.preprocessing import StandardScaler
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 import MixedEffectsModeling.config as config
-from MixedEffectsModeling.core.calibration import gene_shash_calibration
+from MixedEffectsModeling.core.calibration import calibration_metrics
 from MixedEffectsModeling.core.dispersion_trend import load_trend
 from MixedEffectsModeling.core.eb_shrinkage import squeeze_log_theta
 from MixedEffectsModeling.core.marginal_rqr import (
     _poisson_rqr, marginal_nb_loglik, marginal_nb_rqr, nb_marginal_mean_var, nb_marginal_pmf0,
 )
 from MixedEffectsModeling.core.model_engine_mixed import NormativeModelEngineMixed
+from MixedEffectsModeling.core.shash import fit_and_correct
 
 MP = config.SPIKE_PARAMS
-SHASH_MAX_N = 3000
 POISSON_ALPHA_EPS = 1e-8  # alpha -> 0 limit of NB reduces to Poisson; reused so PPC math needs no family branch
 
 
@@ -43,9 +43,20 @@ def squeeze_fold(fits):
     return fits
 
 
+def _mu_alpha(Xa, mu_coef, disp_coef, row, alpha_fn):
+    mu = np.clip(np.exp(Xa @ np.nan_to_num(mu_coef, nan=0.0)), 1e-6, 1e8)
+    if not np.all(np.isnan(disp_coef)):
+        alpha = np.exp(-Xa @ np.nan_to_num(disp_coef, nan=0.0))
+    elif "trend_alpha" in row.index and not pd.isna(row["trend_alpha"]):
+        alpha = np.full(len(Xa), float(row["trend_alpha"]))
+    else:
+        alpha = np.full(len(Xa), alpha_fn(float(mu.mean())))
+    return mu, alpha
+
+
 def cv_model_route(e2, model_genes, stage_of, folds, tmp, disp_prior_path=None):
     if not model_genes:
-        return {}, {}, []
+        return {}, {}, {}, []
     rows, fold_stat_rows = [], []
     for fi, (tr, te) in enumerate(folds):
         scaler = StandardScaler().fit(e2.X_hc_raw[tr])
@@ -68,6 +79,7 @@ def cv_model_route(e2, model_genes, stage_of, folds, tmp, disp_prior_path=None):
         subprocess.run(cmd, check=True, cwd=str(config.GLMM_FIT_R.parent))
 
         fold_fits = squeeze_fold(pd.read_csv(f"{tmp}/res_{fi}.csv").set_index("gene"))
+        Xa_tr = np.column_stack([np.ones(len(tr)), scaler.transform(e2.X_hc_raw[tr])])
         Xa_te = np.column_stack([np.ones(len(te)), scaler.transform(e2.X_hc_raw[te])])
         for g in model_genes:
             if g not in fold_fits.index:
@@ -86,40 +98,39 @@ def cv_model_route(e2, model_genes, stage_of, folds, tmp, disp_prior_path=None):
                 continue
             mu_coef = row[[c for c in fold_fits.columns if c.startswith("mu_coef_")]].values.astype(float)
             disp_coef = row[[c for c in fold_fits.columns if c.startswith("disp_coef_")]].values.astype(float)
-            mu = np.clip(np.exp(Xa_te @ np.nan_to_num(mu_coef, nan=0.0)), 1e-6, 1e8)
-            if not np.all(np.isnan(disp_coef)):
-                alpha = np.exp(-Xa_te @ np.nan_to_num(disp_coef, nan=0.0))
-            elif "trend_alpha" in row.index and not pd.isna(row["trend_alpha"]):
-                alpha = np.full(len(te), float(row["trend_alpha"]))
-            else:
-                alpha = np.full(len(te), e2.alpha_fn(float(mu.mean())))
-            y_te = e2.Y_hc[te, e2._gene_col[g]]
             tau2 = float(row["tau2"])
-            z = marginal_nb_rqr(y_te, mu, alpha, tau2, seed=42 + fi)
-            rows.append(dict(gene=g, fold=fi, y=y_te.astype(np.float32), mu=mu.astype(np.float32),
-                             alpha=np.asarray(alpha, dtype=np.float32),
-                             tau2=np.full(len(te), tau2, dtype=np.float32), z=z))
+            mu_te, alpha_te = _mu_alpha(Xa_te, mu_coef, disp_coef, row, e2.alpha_fn)
+            mu_tr, alpha_tr = _mu_alpha(Xa_tr, mu_coef, disp_coef, row, e2.alpha_fn)
+            y_te = e2.Y_hc[te, e2._gene_col[g]]
+            y_tr = e2.Y_hc[tr, e2._gene_col[g]]
+            z_te = marginal_nb_rqr(y_te, mu_te, alpha_te, tau2, seed=42 + fi)
+            z_tr = marginal_nb_rqr(y_tr, mu_tr, alpha_tr, tau2, seed=1042 + fi)
+            rows.append(dict(gene=g, fold=fi, y=y_te.astype(np.float32), mu=mu_te.astype(np.float32),
+                             alpha=np.asarray(alpha_te, dtype=np.float32),
+                             tau2=np.full(len(te), tau2, dtype=np.float32), z=z_te, z_train=z_tr))
 
-    zdict, ppc_dict = {}, {}
+    zdict, zdict_corr, ppc_dict = {}, {}, {}
     for g in model_genes:
         grecs = [r for r in rows if r["gene"] == g]
         if not grecs:
             continue
         zdict[g] = np.concatenate([r["z"] for r in grecs])
+        # per-fold: SHASH fit on that fold's TRAIN Z only, applied to that fold's held-out Z
+        zdict_corr[g] = np.concatenate([fit_and_correct(r["z_train"], r["z"])[1] for r in grecs])
         ppc_dict[g] = dict(
             y=np.concatenate([r["y"] for r in grecs]),
             mu=np.concatenate([r["mu"] for r in grecs]),
             alpha=np.concatenate([r["alpha"] for r in grecs]),
             tau2=np.concatenate([r["tau2"] for r in grecs]),
             family="negbin", stage=stage_of[g])
-    return zdict, ppc_dict, fold_stat_rows
+    return zdict, zdict_corr, ppc_dict, fold_stat_rows
 
 
 # Shared-beta pooled GLM CV -- one fit per fold across all pool-route genes at once,
 # so fold_stats here are per-fold (fit succeeded or not for the whole bundle), not per-gene.
 def cv_pool_route(e2, genes_t, folds, tmp):
     if not genes_t:
-        return {}, {}, []
+        return {}, {}, {}, []
     rows, fold_stats = [], []
     for fi, (tr, te) in enumerate(folds):
         scaler = StandardScaler().fit(e2.X_hc_raw[tr])
@@ -147,32 +158,37 @@ def cv_pool_route(e2, genes_t, folds, tmp):
         alpha_eff = fit["alpha"] if fit["family"] == "negbin" else POISSON_ALPHA_EPS
         mean_hc = dict(zip(fit["gene"], fit["mean_hc"]))
         eps = fit["eps"]
+        X_tr = scaler.transform(e2.X_hc_raw[tr])
         X_te = scaler.transform(e2.X_hc_raw[te])
-        mult = np.exp(X_te @ beta[1:])
+        mult_tr = np.exp(X_tr @ beta[1:])
+        mult_te = np.exp(X_te @ beta[1:])
         if fit.get("mult_lo") is not None:
-            mult = np.clip(mult, fit["mult_lo"], fit["mult_hi"])
+            mult_tr = np.clip(mult_tr, fit["mult_lo"], fit["mult_hi"])
+            mult_te = np.clip(mult_te, fit["mult_lo"], fit["mult_hi"])
 
+        rqr = _poisson_rqr if fit["family"] == "poisson" else lambda y, mu, seed: marginal_nb_rqr(y, mu, alpha_eff, tau2, seed=seed)
         for g in genes_t:
-            mu = np.clip((mean_hc[g] + eps) * np.exp(beta[0]) * mult, 1e-6, 1e8)
+            mu_te = np.clip((mean_hc[g] + eps) * np.exp(beta[0]) * mult_te, 1e-6, 1e8)
+            mu_tr = np.clip((mean_hc[g] + eps) * np.exp(beta[0]) * mult_tr, 1e-6, 1e8)
             y_te = e2.Y_hc[te, e2._gene_col[g]].astype(np.float64)
-            if fit["family"] == "poisson":
-                z = _poisson_rqr(y_te, mu, seed=42 + fi)
-            else:
-                z = marginal_nb_rqr(y_te, mu, alpha_eff, tau2, seed=42 + fi)
-            rows.append(dict(gene=g, z=z, y=y_te, mu=mu,
-                             alpha=np.full_like(mu, alpha_eff), tau2=np.full_like(mu, tau2)))
+            y_tr = e2.Y_hc[tr, e2._gene_col[g]].astype(np.float64)
+            z_te = rqr(y_te, mu_te, 42 + fi)
+            z_tr = rqr(y_tr, mu_tr, 1042 + fi)
+            rows.append(dict(gene=g, z=z_te, z_train=z_tr, y=y_te, mu=mu_te,
+                             alpha=np.full_like(mu_te, alpha_eff), tau2=np.full_like(mu_te, tau2)))
 
-    zdict, ppc_dict = {}, {}
+    zdict, zdict_corr, ppc_dict = {}, {}, {}
     for g in genes_t:
         grecs = [r for r in rows if r["gene"] == g]
         if not grecs:
             continue
         zdict[g] = np.concatenate([r["z"] for r in grecs])
+        zdict_corr[g] = np.concatenate([fit_and_correct(r["z_train"], r["z"])[1] for r in grecs])
         ppc_dict[g] = dict(
             y=np.concatenate([r["y"] for r in grecs]), mu=np.concatenate([r["mu"] for r in grecs]),
             alpha=np.concatenate([r["alpha"] for r in grecs]), tau2=np.concatenate([r["tau2"] for r in grecs]),
         )
-    return zdict, ppc_dict, fold_stats
+    return zdict, zdict_corr, ppc_dict, fold_stats
 
 
 EMPTY_METRICS = dict(obs_zero_frac=np.nan, pred_zero_frac=np.nan, zero_diff=np.nan, pearson_chi2=np.nan,
@@ -206,7 +222,7 @@ def main():
     ap.add_argument("--limit-genes", type=int, default=None,
                     help="smoke test: only run CV on the first N genes per route")
     ap.add_argument("--engine-dir", type=Path, default=config.ENGINE_MIXED_DIR,
-                    help="directory to load the trained engine from (and re-save with cv_* fields into)")
+                    help="directory to load the trained engine's training_summary.csv from (read-only)")
     ap.add_argument("--out-dir", type=Path, default=config.CV_MIXED_DIR,
                     help="directory to write fold_stats/cv_stats/cv_zscores/cv_ppc into")
     args = ap.parse_args()
@@ -235,9 +251,10 @@ def main():
     Path(tmp).mkdir(exist_ok=True)
 
     print(f"CV: {len(model_genes)} model-route genes, {len(pool_genes)} pool-route genes")
-    zdict_m, ppc_dict_m, fold_stat_rows = cv_model_route(e2, model_genes, stage_of, folds, tmp, disp_prior_path)
-    zdict_p, ppc_dict_p, pool_fold_stats = cv_pool_route(e2, pool_genes, folds, tmp)
+    zdict_m, zcorr_m, ppc_dict_m, fold_stat_rows = cv_model_route(e2, model_genes, stage_of, folds, tmp, disp_prior_path)
+    zdict_p, zcorr_p, ppc_dict_p, pool_fold_stats = cv_pool_route(e2, pool_genes, folds, tmp)
     zdict = {**zdict_m, **zdict_p}
+    zdict_corr = {**zcorr_m, **zcorr_p}
     ppc_dict = {**ppc_dict_m, **ppc_dict_p}
 
     fold_stats = pd.DataFrame(fold_stat_rows)
@@ -249,23 +266,21 @@ def main():
         n_pool_ok = sum(1 for r in pool_fold_stats if r["ok"])
         print(f"pool-route fold success: {n_pool_ok}/{len(pool_fold_stats)}")
 
-    engine = NormativeModelEngineMixed.load(engine_dir)
-
+    # Pure held-out validation: SHASH was already fit per-fold on that fold's TRAIN Z
+    # (cv_model_route/cv_pool_route) and applied to the held-out Z before this point --
+    # calibration_metrics below only grades that already-corrected held-out Z, it fits nothing.
     stats = []
     for g, z in zdict.items():
         v = z[np.isfinite(z)]
         if len(v) < 8:
             continue
+        v_corr = zdict_corr[g][np.isfinite(z)]
         nz = int((e2.Y_hc[:, e2._gene_col[g]] > 0).sum())
-        z_sub = v if len(v) <= SHASH_MAX_N else np.random.default_rng(42).choice(v, SHASH_MAX_N, replace=False)
-        calib = gene_shash_calibration(z_sub)
+        calib = calibration_metrics(v, v_corr)
 
         ppc = ppc_metrics(ppc_dict.get(g, dict(y=np.array([]), mu=np.array([]), alpha=np.array([]), tau2=np.array([]))))
 
         cv_fields = dict(
-            cv_shash_ok=calib["shash_ok"], cv_shash_xi=calib["shash_xi"],
-            cv_shash_eta=calib["shash_eta"], cv_shash_eps=calib["shash_eps"],
-            cv_shash_delta=calib["shash_delta"], cv_shash_z_lo=calib["z_lo"], cv_shash_z_hi=calib["z_hi"],
             cv_raw_skew=calib["raw_skew"], cv_raw_kurtosis=calib["raw_kurtosis"],
             cv_corrected_skew=calib["corrected_skew"], cv_corrected_kurtosis=calib["corrected_kurtosis"],
             cv_naive_exceed=calib["naive_exceed"], cv_shash_exceed=calib["shash_exceed"],
@@ -277,11 +292,6 @@ def main():
             cv_ll_sum=ppc["ll_sum"], cv_ll_mean=ppc["ll_mean"],
         )
 
-        rec = engine.genes.get(g)
-        if rec is not None:
-            for k, val in cv_fields.items():
-                setattr(rec, k, val)
-
         route = "model" if g in zdict_m else "pool"
         stats.append(dict(gene=g, route=route, stage=stage_of[g], nz=nz,
                           mean_z=float(v.mean()), std_z=float(v.std()), n_valid=len(v), **cv_fields))
@@ -290,11 +300,12 @@ def main():
     df.to_csv(out_dir / "cv_stats.csv", index=False)
     with open(out_dir / "cv_zscores.pkl", "wb") as f:
         pickle.dump(zdict, f)
+    with open(out_dir / "cv_zscores_shash.pkl", "wb") as f:
+        pickle.dump(zdict_corr, f)
     with open(out_dir / "cv_ppc.pkl", "wb") as f:
         pickle.dump(ppc_dict, f)
-    engine.save(engine_dir)
     print(df.groupby(["route", "stage"])[["mean_z", "std_z"]].median().to_string())
-    print(f"Saved -> {out_dir}/fold_stats.csv, pool_fold_stats.csv, cv_stats.csv, cv_zscores.pkl, cv_ppc.pkl, updated {engine_dir}/genes.pkl")
+    print(f"Saved -> {out_dir}/fold_stats.csv, pool_fold_stats.csv, cv_stats.csv, cv_zscores.pkl, cv_zscores_shash.pkl, cv_ppc.pkl")
 
 
 if __name__ == "__main__":

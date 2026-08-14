@@ -19,6 +19,7 @@ from MixedEffectsModeling.core.dispersion_trend import load_trend
 from MixedEffectsModeling.core.eb_shrinkage import squeeze_log_theta
 from MixedEffectsModeling.core.marginal_rqr import _poisson_rqr, marginal_nb_rqr
 from MixedEffectsModeling.core.ood_filter import MahalanobisFilter, RangeFilter
+from MixedEffectsModeling.core.shash import fit_and_correct
 from MixedEffectsModeling.validation.cv_engine import squeeze_fold
 
 MP = config.SPIKE_PARAMS
@@ -81,32 +82,38 @@ def _refit_model_genes(tr_idx, data, genes, stage_of, scaler, tmp, disp_prior_pa
     return squeeze_fold(pd.read_csv(f"{tmp}/res.csv").set_index("gene"))
 
 
-def _score_model_genes(fits, genes, te_idx, data, scaler, alpha_fn, seed=42):
-    Xa_te = np.column_stack([np.ones(len(te_idx)), scaler.transform(data["X_raw"][te_idx])])
+def _score_model_genes(fits, genes, idx, data, scaler, alpha_fn, seed=42, report=True):
+    """Score `genes` at `idx` (either the held-out batch or, for the SHASH
+    train-fit below, the same train_idx the GLMM above was just fit on).
+    report=False skips the per-gene fold_info rows (only needed once, for the
+    held-out call)."""
+    Xa = np.column_stack([np.ones(len(idx)), scaler.transform(data["X_raw"][idx])])
     zdict, rows = {}, []
     for g in genes:
         if g not in fits.index:
-            rows.append(dict(gene=g, route="model", ok=False, fail_reason="fold_output_missing"))
+            if report:
+                rows.append(dict(gene=g, route="model", ok=False, fail_reason="fold_output_missing"))
             continue
         row = fits.loc[g]
         ok = bool(row["ok"])
-        rows.append(dict(gene=g, route="model", stage=row["stage"], ok=ok,
-                         singular=bool(row["singular"]) if not pd.isna(row["singular"]) else None,
-                         tau2=float(row["tau2"]) if not pd.isna(row["tau2"]) else np.nan,
-                         fail_reason=row["fail_reason"] if not pd.isna(row["fail_reason"]) else ""))
+        if report:
+            rows.append(dict(gene=g, route="model", stage=row["stage"], ok=ok,
+                             singular=bool(row["singular"]) if not pd.isna(row["singular"]) else None,
+                             tau2=float(row["tau2"]) if not pd.isna(row["tau2"]) else np.nan,
+                             fail_reason=row["fail_reason"] if not pd.isna(row["fail_reason"]) else ""))
         if not ok:
             continue
         mu_coef = row[[c for c in fits.columns if c.startswith("mu_coef_")]].values.astype(float)
         disp_coef = row[[c for c in fits.columns if c.startswith("disp_coef_")]].values.astype(float)
-        mu = np.clip(np.exp(Xa_te @ np.nan_to_num(mu_coef, nan=0.0)), 1e-6, 1e8)
+        mu = np.clip(np.exp(Xa @ np.nan_to_num(mu_coef, nan=0.0)), 1e-6, 1e8)
         if not np.all(np.isnan(disp_coef)):
-            alpha = np.exp(-Xa_te @ np.nan_to_num(disp_coef, nan=0.0))
+            alpha = np.exp(-Xa @ np.nan_to_num(disp_coef, nan=0.0))
         elif "trend_alpha" in row.index and not pd.isna(row["trend_alpha"]):
-            alpha = np.full(len(te_idx), float(row["trend_alpha"]))
+            alpha = np.full(len(idx), float(row["trend_alpha"]))
         else:
-            alpha = np.full(len(te_idx), alpha_fn(float(mu.mean())))
-        y_te = data["Y"][te_idx, data["gene_col"][g]]
-        z = marginal_nb_rqr(y_te, mu, alpha, float(row["tau2"]), seed=seed)
+            alpha = np.full(len(idx), alpha_fn(float(mu.mean())))
+        y = data["Y"][idx, data["gene_col"][g]]
+        z = marginal_nb_rqr(y, mu, alpha, float(row["tau2"]), seed=seed)
         zdict[g] = z.astype(np.float32)
     return zdict, rows
 
@@ -127,7 +134,7 @@ def _refit_and_score_pool(tr_idx, te_idx, data, genes, scaler, tmp):
     with open(f"{tmp}/pool_res.json") as f:
         fit = json.load(f)
     if not fit["ok"]:
-        return {}, [dict(gene=g, route="pool", ok=False, fail_reason="pooled_glmm_fit_error") for g in genes]
+        return {}, {}, [dict(gene=g, route="pool", ok=False, fail_reason="pooled_glmm_fit_error") for g in genes]
 
     beta = np.asarray(fit["beta"])
     tau2 = float(fit["tau2"]) if fit.get("tau2") is not None else 0.0
@@ -135,18 +142,24 @@ def _refit_and_score_pool(tr_idx, te_idx, data, genes, scaler, tmp):
     mean_hc = dict(zip(fit["gene"], fit["mean_hc"]))
     eps = fit["eps"]
     Xs_te = scaler.transform(data["X_raw"][te_idx])
-    mult = np.exp(Xs_te @ beta[1:])
+    Xs_tr = scaler.transform(data["X_raw"][tr_idx])
+    mult_te = np.exp(Xs_te @ beta[1:])
+    mult_tr = np.exp(Xs_tr @ beta[1:])
     if fit.get("mult_lo") is not None:
-        mult = np.clip(mult, fit["mult_lo"], fit["mult_hi"])
+        mult_te = np.clip(mult_te, fit["mult_lo"], fit["mult_hi"])
+        mult_tr = np.clip(mult_tr, fit["mult_lo"], fit["mult_hi"])
 
-    zdict, rows = {}, []
+    rqr = _poisson_rqr if fit["family"] == "poisson" else lambda y, mu, seed: marginal_nb_rqr(y, mu, alpha_eff, tau2, seed=seed)
+    zdict, zdict_tr, rows = {}, {}, []
     for g in genes:
-        mu = np.clip((mean_hc[g] + eps) * np.exp(beta[0]) * mult, 1e-6, 1e8)
+        mu_te = np.clip((mean_hc[g] + eps) * np.exp(beta[0]) * mult_te, 1e-6, 1e8)
+        mu_tr = np.clip((mean_hc[g] + eps) * np.exp(beta[0]) * mult_tr, 1e-6, 1e8)
         y_te = data["Y"][te_idx, data["gene_col"][g]]
-        z = _poisson_rqr(y_te, mu, seed=42) if fit["family"] == "poisson" else marginal_nb_rqr(y_te, mu, alpha_eff, tau2, seed=42)
-        zdict[g] = z.astype(np.float32)
+        y_tr = data["Y"][tr_idx, data["gene_col"][g]]
+        zdict[g] = rqr(y_te, mu_te, 42).astype(np.float32)
+        zdict_tr[g] = rqr(y_tr, mu_tr, 1042).astype(np.float32)
         rows.append(dict(gene=g, route="pool", ok=True, family=fit["family"]))
-    return zdict, rows
+    return zdict, zdict_tr, rows
 
 
 def run_one_batch(batch_id, data, summary, alpha_fn, disp_prior_path, tmp, limit_genes=None):
@@ -163,22 +176,34 @@ def run_one_batch(batch_id, data, summary, alpha_fn, disp_prior_path, tmp, limit
     scaler = StandardScaler().fit(data["X_raw"][tr_idx])
 
     t0 = time.perf_counter()
-    zdict, fold_rows = {}, []
+    zdict, zdict_tr, fold_rows = {}, {}, []
     if model_genes:
         fits = _refit_model_genes(tr_idx, data, model_genes, stage_of, scaler, tmp, disp_prior_path)
         z_m, rows_m = _score_model_genes(fits, model_genes, te_idx, data, scaler, alpha_fn)
+        z_m_tr, _ = _score_model_genes(fits, model_genes, tr_idx, data, scaler, alpha_fn, seed=1042, report=False)
         zdict.update(z_m)
+        zdict_tr.update(z_m_tr)
         fold_rows += rows_m
     if pool_genes:
-        z_p, rows_p = _refit_and_score_pool(tr_idx, te_idx, data, pool_genes, scaler, tmp)
+        z_p, z_p_tr, rows_p = _refit_and_score_pool(tr_idx, te_idx, data, pool_genes, scaler, tmp)
         zdict.update(z_p)
+        zdict_tr.update(z_p_tr)
         fold_rows += rows_p
 
-    Z = np.column_stack([zdict[g] for g in zdict]) if zdict else np.empty((len(te_idx), 0))
+    # Per-gene SHASH fit on THIS batch's own train-fold (HC minus the held-out
+    # batch) in-sample Z, applied to the held-out batch Z -- the LOBO analogue
+    # of NormativeModelEngineMixed.fit_shash, never fit on the held-out Z itself.
+    genes_scored = [g for g in zdict if g in zdict_tr]
+    Z_shash = {g: fit_and_correct(zdict_tr[g], zdict[g])[1].astype(np.float32) for g in genes_scored}
+
+    gene_names = list(zdict.keys())
+    Z = np.column_stack([zdict[g] for g in gene_names]) if gene_names else np.empty((len(te_idx), 0))
+    Z_shash_arr = (np.column_stack([Z_shash.get(g, zdict[g]) for g in gene_names])
+                  if gene_names else np.empty((len(te_idx), 0)))
     return dict(
         batch_id=batch_id, n_hc_train=len(tr_idx), n_test=len(te_idx),
         test_names=data["names"][te_idx].tolist(), test_is_hc=is_hc[te_idx].tolist(),
-        gene_names=list(zdict.keys()), Z=Z, fold_info=pd.DataFrame(fold_rows),
+        gene_names=gene_names, Z=Z, Z_shash=Z_shash_arr, fold_info=pd.DataFrame(fold_rows),
         elapsed_s=time.perf_counter() - t0,
     )
 
@@ -188,6 +213,7 @@ def save_batch_result(res, tier, n_dis, out_dir):
     bdir = out_dir / safe
     bdir.mkdir(parents=True, exist_ok=True)
     np.save(bdir / "Z_test.npy", res["Z"])
+    np.save(bdir / "Z_test_shash.npy", res["Z_shash"])
     with open(bdir / "gene_names.pkl", "wb") as f:
         pickle.dump(res["gene_names"], f)
     meta = dict(batch_id=res["batch_id"], tier=tier, n_dis=n_dis,

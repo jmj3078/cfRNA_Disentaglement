@@ -13,6 +13,7 @@ from sklearn.preprocessing import StandardScaler
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 import MixedEffectsModeling.config as config
+from MixedEffectsModeling.core.calibration import gene_shash_calibration
 from MixedEffectsModeling.core.dispersion_trend import (
     build_trend, build_trend_from_fits, load_trend, save_trend,
 )
@@ -253,6 +254,7 @@ class NormativeModelEngineMixed:
 
         self.apply_disp_squeeze()
         self.train_pool(tmp_dir=tmp_dir)
+        self.fit_shash()
 
     def train_pool(self, tmp_dir="/tmp/glmm_train"):
         """Route "pool": one shared-beta pooled GLM (+ batch random intercept)
@@ -291,6 +293,35 @@ class NormativeModelEngineMixed:
             rec = self.genes[g]
             rec.mean_hc, rec.ok, rec.stage = float(m), True, "pool"
 
+    def fit_shash(self, seed=42):
+        """Per-gene SHASH fit on THIS engine's own in-sample HC Z (scored under
+        the params just trained above) -- the production null that disease Z
+        is corrected against downstream. Deliberately in-sample: CV/LOBO exist
+        to validate that this train-fit transform generalizes to genuinely
+        held-out HC, not to supply the production params themselves (fitting
+        on held-out Z here would mean the params never face a held-out check
+        at all -- see validation/cv_engine.py, validation/lobo_engine.py)."""
+        gene_names = [g for g, r in self.genes.items() if r.ok]
+        if not gene_names:
+            return
+        Z = self.score(self.X_hc_raw, self.Y_hc, gene_names=gene_names, seed=seed)
+        for j, g in enumerate(gene_names):
+            z = Z[:, j]
+            z = z[np.isfinite(z)]
+            if len(z) < 8:
+                continue
+            calib = gene_shash_calibration(z)
+            rec = self.genes[g]
+            rec.cv_shash_ok, rec.cv_shash_xi = calib["shash_ok"], calib["shash_xi"]
+            rec.cv_shash_eta, rec.cv_shash_eps = calib["shash_eta"], calib["shash_eps"]
+            rec.cv_shash_delta = calib["shash_delta"]
+            rec.cv_shash_z_lo, rec.cv_shash_z_hi = calib["z_lo"], calib["z_hi"]
+            rec.cv_raw_skew, rec.cv_raw_kurtosis = calib["raw_skew"], calib["raw_kurtosis"]
+            rec.cv_corrected_skew, rec.cv_corrected_kurtosis = calib["corrected_skew"], calib["corrected_kurtosis"]
+            rec.cv_naive_exceed, rec.cv_shash_exceed = calib["naive_exceed"], calib["shash_exceed"]
+            rec.cv_naive_fdr_reject_rate = calib["naive_fdr_reject_rate"]
+            rec.cv_corr_fdr_reject_rate = calib["corr_fdr_reject_rate"]
+
     def training_summary(self):
         rows = [dict(gene=r.name, route=r.route, stage=r.stage, nz=r.nz, ok=r.ok,
                     singular=r.singular, tau2=r.tau2, tau2_collapsed=bool(r.tau2 < 1e-4),
@@ -298,7 +329,11 @@ class NormativeModelEngineMixed:
                     n_outliers=r.n_outliers, outlier_refit_failed=r.outlier_refit_failed,
                     fail_reason=r.fail_reason,
                     nbi_full_eb_reject_reason=r.nbi_full_eb_reject_reason,
-                    nbi_intercept_eb_reject_reason=r.nbi_intercept_eb_reject_reason)
+                    nbi_intercept_eb_reject_reason=r.nbi_intercept_eb_reject_reason,
+                    cv_shash_ok=r.cv_shash_ok, cv_shash_xi=r.cv_shash_xi, cv_shash_eta=r.cv_shash_eta,
+                    cv_shash_eps=r.cv_shash_eps, cv_shash_delta=r.cv_shash_delta,
+                    cv_naive_exceed=r.cv_naive_exceed, cv_shash_exceed=r.cv_shash_exceed,
+                    cv_naive_fdr_reject_rate=r.cv_naive_fdr_reject_rate, cv_corr_fdr_reject_rate=r.cv_corr_fdr_reject_rate)
                for r in self.genes.values()]
         return pd.DataFrame(rows).set_index("gene")
 

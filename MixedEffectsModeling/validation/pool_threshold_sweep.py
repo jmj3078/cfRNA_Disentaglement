@@ -82,7 +82,7 @@ def main():
 
     if not (set(superset) <= set(ind_fold_info)):
         log.info(f"individual (model-route) CV baseline on {len(superset)} genes...")
-        zdict_ind, ppc_dict_ind, ind_fold_stat_rows = cv_model_route(e2, superset, stage_of, folds, tmp)
+        zdict_ind, _, ppc_dict_ind, ind_fold_stat_rows = cv_model_route(e2, superset, stage_of, folds, tmp)
         ind_fold_info = {g: dict(n_folds_ok=0, fail_reasons=[]) for g in superset}
         for r in ind_fold_stat_rows:
             info = ind_fold_info[r["gene"]]
@@ -107,7 +107,7 @@ def main():
         if not genes_t:
             continue
         log.info(f"threshold={t}: pooled CV on {len(genes_t)} genes...")
-        zdict_pool, ppc_dict_pool, pool_fold_stats = cv_pool_route(e2, genes_t, folds, tmp)
+        zdict_pool, _, ppc_dict_pool, pool_fold_stats = cv_pool_route(e2, genes_t, folds, tmp)
         pool_n_folds_ok = sum(1 for r in pool_fold_stats if r["ok"])
         pool_fail_reasons = ";".join(f"fold{r['fold']}:{r['fail_reason']}" for r in pool_fold_stats if not r["ok"])
 

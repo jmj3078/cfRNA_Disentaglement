@@ -4,6 +4,7 @@ from scipy.optimize import minimize
 from scipy.stats import norm
 
 IDENTITY = (0.0, 1.0, 0.0, 1.0)  # xi, eta, eps, delta -- no-op transform
+SHASH_MAX_N = 3000  # subsample cap before Nelder-Mead SHASH fit
 
 
 def shash_logpdf(x, xi, eta, eps, delta):
@@ -41,11 +42,32 @@ def fit_shash(x):
     return (xi, eta, eps, delta, ok) if ok else (*IDENTITY, False)
 
 
-def load_shash_params(cv_stats_path):
-    """Per-gene SHASH params fit on in-fold CV Z (core/calibration.py
-    gene_shash_calibration) -- the correction for residual per-gene
+def fit_shash_subsampled(z, max_n=SHASH_MAX_N, seed=42):
+    """fit_shash after an optional random subsample to max_n -- shared by every
+    caller that fits SHASH on a (possibly large) pooled Z vector."""
+    z = np.asarray(z, dtype=np.float64)
+    z = z[np.isfinite(z)]
+    if len(z) > max_n:
+        z = np.random.default_rng(seed).choice(z, max_n, replace=False)
+    return fit_shash(z)
+
+
+def fit_and_correct(z_fit, z_eval, max_n=SHASH_MAX_N, seed=42):
+    """Fit SHASH on z_fit (train/in-sample) ONLY, then apply that transform to
+    z_eval (held-out) -- z_fit and z_eval must be independent samples, or the
+    correction is not validated by whatever z_eval is later used to check."""
+    xi, eta, eps, delta, ok = fit_shash_subsampled(z_fit, max_n=max_n, seed=seed)
+    z_eval = np.asarray(z_eval, dtype=np.float64)
+    z_corr = shash_transform_to_z(z_eval, xi, eta, eps, delta) if ok else z_eval.copy()
+    return dict(ok=ok, xi=xi, eta=eta, eps=eps, delta=delta), z_corr
+
+
+def load_shash_params(stats_path):
+    """Per-gene SHASH params -- production params fit on the trained engine's
+    own in-sample HC Z (model_engine_mixed.NormativeModelEngineMixed.fit_shash,
+    written into training_summary.csv), the correction for residual per-gene
     skew/kurtosis a raw RQR Z carries before it can be treated as N(0,1)."""
-    return pd.read_csv(cv_stats_path).set_index("gene")[
+    return pd.read_csv(stats_path).set_index("gene")[
         ["cv_shash_ok", "cv_shash_xi", "cv_shash_eta", "cv_shash_eps", "cv_shash_delta"]]
 
 
