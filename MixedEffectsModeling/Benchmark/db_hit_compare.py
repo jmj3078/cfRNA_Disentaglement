@@ -162,6 +162,23 @@ def gene_venn_sets(design_b="covariate"):
             for ph in sorted(set(nocov) & set(db) & set(norm_union))}
 
 
+def gene_venn_sets_4way(design_c="ruvg_k2"):
+    """{phenotype: {deseq2_no_cov, deseq2_covariate, deseq2_<design_c>, normative}} symbol sets --
+    same 4 methods as 5_group_level_comparison.ipynb's DESEQ2_DESIGNS + normative_union, for
+    checking whether normative overlaps DESeq2(no_cov) more than the covariate-adjusted designs
+    (a sign covariate adjustment isn't actually being absorbed in the normative Z)."""
+    sym_of = ensg_to_symbol()
+    sm = pd.read_csv(ZDIR / "sample_meta.csv")
+    gene_names = pickle.load(open(ZDIR / "gene_names.pkl", "rb"))
+    nocov = deseq2_gene_sets("no_covariate", sym_of)
+    cov = deseq2_gene_sets("covariate", sym_of)
+    ruvg = deseq2_gene_sets(design_c, sym_of)
+    norm_union = gene_sets_from_hits(normative_gene_hits(sm, gene_names, sym_of), K=1)
+    common = sorted(set(nocov) & set(cov) & set(ruvg) & set(norm_union))
+    return {ph: {"deseq2_no_cov": nocov[ph], "deseq2_covariate": cov[ph],
+                 DESIGN_LABELS[design_c]: ruvg[ph], "normative": norm_union[ph]} for ph in common}
+
+
 def novel_gene_table():
     """One row per (phenotype, gene) for genes normative flags (union, K=1) that neither DESeq2
     design (no_covariate/covariate) reaches, restricted to genes with an Open Targets association
