@@ -5,7 +5,7 @@ import gseapy as gp
 import numpy as np
 import pandas as pd
 import scanpy as sc
-from scipy.stats import hypergeom
+from scipy.stats import hypergeom, norm
 
 import MixedEffectsModeling.config as config
 from MixedEffectsModeling.core.calibration import bh_fdr_reject
@@ -16,6 +16,61 @@ PCDIR = config.PATHWAY_CONV_DIR
 
 def slugify(phenotype):
     return phenotype.strip().replace(" ", "_").replace("/", "-")
+
+
+def pairwise_overlap(masks):
+    """Jaccard + overlap-coefficient for every patient pair, given a (n_patients, n_items) bool
+    matrix. Mirrors Wolfers 2018 JAMA Psych / Segal 2023 Nat Neurosci deviation-overlap design.
+    NOTE: raw Jaccard is NOT comparable across item universes of different size (N) -- with small
+    per-patient hit counts relative to N, near-zero Jaccard is a combinatorial near-certainty
+    regardless of whether hits are real signal or noise. Use `overlap_enrichment` for a
+    size-matched-null-normalized statistic before claiming "convergence" or "heterogeneity"."""
+    inter = masks.astype(int) @ masks.astype(int).T
+    sizes = masks.sum(axis=1)
+    union = sizes[:, None] + sizes[None, :] - inter
+    jacc = np.divide(inter, union, out=np.zeros_like(inter, dtype=float), where=union > 0)
+    minsz = np.minimum(sizes[:, None], sizes[None, :])
+    ovc = np.divide(inter, minsz, out=np.zeros_like(inter, dtype=float), where=minsz > 0)
+    iu = np.triu_indices(masks.shape[0], k=1)
+    return jacc[iu], ovc[iu]
+
+
+def overlap_enrichment(masks, n_perm=200, seed=42):
+    """Size-matched-null-normalized pairwise overlap: is observed Jaccard higher than what
+    patients with the SAME per-patient hit counts would show if hits were random draws from the
+    N-item universe? Each null rep reassigns each patient's own hit count to random items
+    (independently per patient) and recomputes the pairwise Jaccard; the null distribution is
+    over per-rep MEDIAN Jaccard (matching the summary statistic reported for the observed data),
+    not over individual pairs, since ~n_pat*(n_pat-1)/2 pairs from ONE null draw are not
+    independent replicates of the null. Returns (obs_median, null_median, null_sd, enrichment_ratio,
+    perm_pvalue) -- one-sided: fraction of null-rep medians >= observed median."""
+    rng = np.random.default_rng(seed)
+    n_pat, N = masks.shape
+    sizes = masks.sum(axis=1)
+    obs_jacc, _ = pairwise_overlap(masks)
+    obs_median = np.median(obs_jacc)
+
+    null_medians = np.empty(n_perm)
+    for r in range(n_perm):
+        null_masks = np.zeros((n_pat, N), dtype=bool)
+        for i, k in enumerate(sizes):
+            if k > 0:
+                idx = rng.choice(N, size=min(int(k), N), replace=False)
+                null_masks[i, idx] = True
+        nj, _ = pairwise_overlap(null_masks)
+        null_medians[r] = np.median(nj)
+
+    null_median = null_medians.mean()
+    null_sd = null_medians.std(ddof=1)
+    if null_median > 0:
+        ratio = obs_median / null_median
+    elif obs_median > 0:
+        ratio = np.inf  # unbeatable convergence: null never produced ANY overlap, but observed did
+    else:
+        ratio = np.nan  # both zero -- truly untestable, not "no signal" in either direction
+    pval = (1 + np.sum(null_medians >= obs_median)) / (n_perm + 1)
+    return dict(obs_median=obs_median, null_median=null_median, null_sd=null_sd,
+                enrichment_ratio=ratio, perm_pvalue=pval)
 
 
 # ENSG -> gene-symbol vocabulary is phenotype-independent (fixed by the H5AD var table), cached once
@@ -126,11 +181,14 @@ def run_phenotype(phenotype, Z, gene_names, meta, universe_syms, sym2idx, col2sy
     n_path = len(terms)
     p_path = np.ones((n_pat, n_path))
     path_sig = np.zeros((n_pat, n_path), dtype=bool)
+    gene_sig = np.zeros((n_pat, N), dtype=bool)  # per-sample |Z|>z_thresh mask, symbol space --
+    # feeds gene-level reoccurrence (overlap_enrichment) same way path_sig feeds pathway-level
     n_sig_gene = np.zeros(n_pat, dtype=int)
 
     for i in range(n_pat):
         present = Fm[i] > 0
         sig = present & (np.abs(Zu[i]) > PP["z_thresh"])
+        gene_sig[i] = sig
         n_universe, n_sig = int(present.sum()), int(sig.sum())
         n_sig_gene[i] = n_sig
         if n_sig == 0:
@@ -145,7 +203,8 @@ def run_phenotype(phenotype, Z, gene_names, meta, universe_syms, sym2idx, col2sy
 
     n_path_sig = path_sig.sum(axis=1)
 
-    pickle.dump(dict(names_c=names_c, terms=terms, n_sig_gene=n_sig_gene, p_path=p_path,
+    pickle.dump(dict(names_c=names_c, terms=terms, universe_syms=universe_syms,
+                      gene_sig=gene_sig, n_sig_gene=n_sig_gene, p_path=p_path,
                       path_sig=path_sig, z_thresh=PP["z_thresh"], fdr_q=PP["fdr_q"]),
                 open(pdir / "sig.pkl", "wb"))
 
@@ -220,6 +279,72 @@ def run_phenotype_directional(phenotype, Z, gene_names, meta, universe_syms, sym
         phenotype=label, n_pat=n_pat,
         path_sig_up_median=float(np.median(n_up)), path_sig_up_max=int(n_up.max()),
         path_sig_down_median=float(np.median(n_down)), path_sig_down_max=int(n_down.max()),
+    )
+
+
+# BH-FDR sweep at the SAMPLE level: run_phenotype/run_phenotype_directional already cache the raw
+# (pre-BH) p_path/p_up/p_down plus Zu/Fm, so a q-sweep never needs the engine or the hypergeometric
+# test rerun -- only the BH threshold changes. These three helpers reproduce exactly the BH call
+# each cascade stage makes, just parameterized by q instead of PP["fdr_q"].
+def gene_sig_at_q(Zu, Fm, q):
+    p_all = 2 * norm.sf(np.abs(Zu))
+    sig = np.zeros_like(Fm, dtype=bool)
+    for i in range(Zu.shape[0]):
+        present = Fm[i] > 0
+        if present.any():
+            sig[i, present] = bh_fdr_reject(p_all[i, present], q=q)
+    return sig
+
+
+def path_sig_at_q(p_path, q):
+    return np.array([bh_fdr_reject(p_path[i], q=q) for i in range(p_path.shape[0])])
+
+
+def path_sig_directional_at_q(p_up, p_down, q):
+    # matches run_phenotype_directional: BH-FDR jointly across this sample's [up, down] p-values
+    n_pat, n_path = p_up.shape
+    up, down = np.zeros((n_pat, n_path), dtype=bool), np.zeros((n_pat, n_path), dtype=bool)
+    for i in range(n_pat):
+        reject = bh_fdr_reject(np.concatenate([p_up[i], p_down[i]]), q=q)
+        up[i], down[i] = reject[:n_path], reject[n_path:]
+    return up, down
+
+
+def q_tag(q):
+    return "" if q == PP["fdr_q"] else f"_q{q:g}".replace(".", "")
+
+
+# per-sample, per-(gene/pathway/up/down) IDENTITY at a given BH-FDR q -- one file per phenotype per
+# q (PathwayConvergence/<slug>/reoccurrence<tag>.pkl), mirroring run_phenotype's own per-phenotype
+# storage. This is the sample-level detail that a pure summary-statistic sweep (ratio/nonzero_pair_
+# frac) throws away: which specific genes/pathways recur, and in which patients, so reproducibility
+# can be checked sample-by-sample, not just as an aggregate Jaccard number. Requires sig.pkl (for
+# p_path) and universe.pkl (for Zu/Fm) to already exist -- run run_phenotype first.
+def run_reoccurrence_detail(phenotype, q, label=None, include_batches=None):
+    slug = slugify(label or phenotype)
+    pdir = PCDIR / slug
+    sig_path = pdir / "sig.pkl"
+    if not sig_path.exists():
+        return None
+    d = pickle.load(open(sig_path, "rb"))
+    Zu, Fm = pickle.load(open(pdir / "universe.pkl", "rb"))
+
+    out = dict(names_c=d["names_c"], terms=d["terms"], q=q,
+              gene_sig=gene_sig_at_q(Zu, Fm, q), path_sig=path_sig_at_q(d["p_path"], q))
+
+    dd_path = pdir / "sig_directional.pkl"
+    if dd_path.exists():
+        dd = pickle.load(open(dd_path, "rb"))
+        out["path_sig_up"], out["path_sig_down"] = path_sig_directional_at_q(dd["p_up"], dd["p_down"], q)
+
+    pickle.dump(out, open(pdir / f"reoccurrence{q_tag(q)}.pkl", "wb"))
+    return dict(
+        phenotype=label or phenotype, q=q, n_pat=len(d["names_c"]),
+        n_sig_gene_median=float(np.median(out["gene_sig"].sum(axis=1))),
+        n_sig_path_median=float(np.median(out["path_sig"].sum(axis=1))),
+        **({"n_sig_path_up_median": float(np.median(out["path_sig_up"].sum(axis=1))),
+            "n_sig_path_down_median": float(np.median(out["path_sig_down"].sum(axis=1)))}
+           if "path_sig_up" in out else {}),
     )
 
 

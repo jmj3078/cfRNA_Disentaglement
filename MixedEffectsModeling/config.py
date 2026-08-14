@@ -107,6 +107,10 @@ PATHWAY_CONV_PARAMS = {
     # dilutes the enrichment ratio with background noise genes) and stricter (2.33/2.58, too few
     # genes left for hypergeometric power) alternatives in a 4-point sweep on Tuberculosis.
     "z_thresh": 1.96,
+    # kept at the nominal 0.05 default for the pipeline's own path_sig/path_sig_up/path_sig_down --
+    # p_path/p_up/p_down (pre-BH hypergeometric p-values) are cached in sig.pkl/sig_directional.pkl
+    # regardless of q, so a q-sweep for reoccurrence analysis is done by re-thresholding those cached
+    # p-values in the notebook (4_gene_pathway_reoccurence.ipynb sec. 1), not by rerunning the engine.
     "fdr_q": 0.05,
     "seed": 42,
     # Blood/cfRNA transcriptomics has a literature-recognized confound here, not just an in-house
