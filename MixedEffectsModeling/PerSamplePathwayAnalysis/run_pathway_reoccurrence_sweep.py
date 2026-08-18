@@ -3,10 +3,10 @@ from pathlib import Path
 
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 import MixedEffectsModeling.config as config
-from MixedEffectsModeling.core.pathway_convergence import run_reoccurrence_detail
+from MixedEffectsModeling.PerSamplePathwayAnalysis.pathway_convergence import run_reoccurrence_detail
 
 # same jobs as run_pathway_convergence_batch.py -- run that first, this only reuses its sig.pkl/
 # universe.pkl/sig_directional.pkl caches (no Z/engine access needed, just re-thresholding).
@@ -36,5 +36,5 @@ if __name__ == "__main__":
             results.append(summary)
 
     pd.DataFrame(results).to_csv(PCDIR / "reoccurrence_sweep_summary.csv", index=False)
-    print("done, summary written to PathwayConvergence/reoccurrence_sweep_summary.csv "
-          "-- per-sample detail in PathwayConvergence/<phenotype>/reoccurrence_q*.pkl", flush=True)
+    print("done, summary written to PerSamplePathwayAnalysis/reoccurrence_sweep_summary.csv "
+          "-- per-sample detail in PerSamplePathwayAnalysis/<phenotype>/reoccurrence_q*.pkl", flush=True)

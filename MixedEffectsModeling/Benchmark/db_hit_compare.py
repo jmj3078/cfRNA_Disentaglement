@@ -2,7 +2,7 @@
 
 Every method is scored by the same rule -- own significant genes/pathways intersected
 with an Open Targets reference -- so counts (recall) and rates (precision) are directly
-comparable. See MixedEffectsModeling/CLAUDE.md and PathwayConvergence for the underlying
+comparable. See MixedEffectsModeling/CLAUDE.md and PerSamplePathwayAnalysis for the underlying
 normative sample-level results this reuses.
 """
 import pickle
@@ -14,7 +14,7 @@ import scanpy as sc
 
 import MixedEffectsModeling.config as config
 from MixedEffectsModeling.core.calibration import bh_fdr_reject
-from MixedEffectsModeling.core.pathway_convergence import (
+from MixedEffectsModeling.PerSamplePathwayAnalysis.pathway_convergence import (
     collapse_to_symbols, load_pathway_library, load_symbol_vocab, slugify,
 )
 
@@ -84,7 +84,7 @@ def deseq2_gene_sets(design, sym_of, alpha=0.05):
 
 
 def pc_dirs_by_phenotype(sample_meta):
-    """{phenotype: [pdir, ...]} -- resolves PathwayConvergence subdirs (some phenotypes are
+    """{phenotype: [pdir, ...]} -- resolves PerSamplePathwayAnalysis subdirs (some phenotypes are
     split per-study) back to the canonical phenotype via the samples actually inside sig.pkl,
     not by parsing directory names."""
     ph_of = sample_meta.set_index("sample")["phenotype"]
@@ -107,9 +107,9 @@ def model_route_mask(gene_names):
 
 def normative_gene_hits(sample_meta, gene_names, sym_of, q=0.05, Z=None, exclude_pool=False):
     """{phenotype: [per-patient significant-symbol-set, ...]}, computed directly from
-    Z_disease_shash.npy (SHASH-calibrated, same array PathwayConvergence/3_disease_scoring.ipynb
+    Z_disease_shash.npy (SHASH-calibrated, same array PerSamplePathwayAnalysis/3_disease_scoring.ipynb
     score significance from) for every phenotype with OOD-kept samples -- NOT sourced from
-    PathwayConvergence's sig.pkl, which only covers the ~9 phenotypes that batch script scoped in
+    PerSamplePathwayAnalysis's sig.pkl, which only covers the ~9 phenotypes that batch script scoped in
     (missing HIV, ME/CFS, MM, MGUS, Liver Cirrhosis, HIV+TB, CAD_HF+/-, Other Cancer, ICI-*).
     Raw per-patient sets -- callers build union (K=1) or recurrence (K>=k) gene sets from these
     via gene_sets_from_hits without recomputing p-values per threshold.
@@ -429,7 +429,7 @@ def matched_threshold_sweep(qs=(0.05, 0.10, 0.15, 0.20), deseq2_design="no_covar
 
 def cross_study_replication(recur_K=1):
     """DB-independent reproducibility check: for phenotypes split across >=2 independent
-    PathwayConvergence study dirs (currently only Liver Cancer: Chen et al. vs Roskams-Hieter B
+    PerSamplePathwayAnalysis study dirs (currently only Liver Cancer: Chen et al. vs Roskams-Hieter B
     et al.), hypergeometric-test each pair's significant gene/pathway sets against EACH OTHER
     (not against the Open Targets reference) -- tests whether two independent cohorts of the same
     phenotype converge on the same signal, at gene and pathway level."""
@@ -469,10 +469,10 @@ def stouffer_group_z(sm=None, Z=None, gene_names=None, min_n=3):
     DESeq2's per-gene Wald stat. Valid because SHASH calibration targets Z~N(0,1) under the null for
     every patient independently (Stouffer 1949 meta-analytic combination of independent Z-scores).
     Grouped by (phenotype, study) -- NOT phenotype alone -- because Liver Cancer pools 3 technically
-    distinct studies (Chen/Roskams-Hieter B/Block, same confound PathwayConvergence splits out via
+    distinct studies (Chen/Roskams-Hieter B/Block, same confound PerSamplePathwayAnalysis splits out via
     per-study sig.pkl dirs, see run_pathway_convergence_batch.py); pooling them would mix each
     study's own technical variance into a single ranking statistic. min_n=3 drops Block et al.
-    (n=2), too small for a group statistic (same threshold as PathwayConvergence)."""
+    (n=2), too small for a group statistic (same threshold as PerSamplePathwayAnalysis)."""
     if Z is None:
         Z = np.load(ZDIR / "Z_disease_shash.npy")
     if sm is None:
@@ -736,7 +736,7 @@ def pathway_level_db_hits(save=True, designs=("no_covariate", "covariate", "ruvg
 def gsea_prerank(rnk, terms, M, universe_syms, n_perm=1000, seed=42, min_size=5, max_size=1000,
                  threads=8):
     """Standard preranked GSEA on a gene-symbol -> score ranking, using the SAME KEGG+Reactome
-    housekeeping-filtered library as PathwayConvergence (`load_pathway_library`). Returns gseapy's
+    housekeeping-filtered library as PerSamplePathwayAnalysis (`load_pathway_library`). Returns gseapy's
     res2d (Term, NES, FDR q-val, ...)."""
     import gseapy as gp
     gene_sets = {t: [universe_syms[j] for j in np.where(M[ti])[0]] for ti, t in enumerate(terms)}

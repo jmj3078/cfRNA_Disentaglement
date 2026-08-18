@@ -1,17 +1,21 @@
 import pickle
 import re
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-import config
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+import MixedEffectsModeling.config as config
+from MixedEffectsModeling.SignalTrendAnalysis.sankey_helpers import match_pathway_index
 
 PCDIR = config.PATHWAY_CONV_DIR
-CURDIR = Path(__file__).parent / "Benchmark" / "PathwayCuration"
-GSEA_CACHE = Path(__file__).parent / "Benchmark" / "gsea_cache"
+CURDIR = config.SIGNAL_TREND_CUR_DIR
+GSEA_CACHE = config.ROOT / "MixedEffectsModeling" / "Benchmark" / "gsea_cache"
 
-# curation-file basename -> PathwayConvergence/<slug>/ folder name (differ for multi-study phenotypes)
+# curation-file basename -> PerSamplePathwayAnalysis/<slug>/ folder name (differ for multi-study phenotypes)
 SLUG_MAP = {
     "Tuberculosis": "Tuberculosis",
     "Pancreatitis": "Pancreatitis",
@@ -39,10 +43,11 @@ def parse_curation(md_path):
 
 def lead_genes_for(term, gsea_file):
     df = pd.read_csv(GSEA_CACHE / gsea_file)
-    row = df[df["Term"] == term]
-    if row.empty:
+    terms = df["Term"].tolist()
+    j = match_pathway_index(term, terms)
+    if j is None:
         return []
-    return row.iloc[0]["Lead_genes"].split(";")
+    return df.iloc[j]["Lead_genes"].split(";")
 
 
 def gini(x):

@@ -6,14 +6,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 import MixedEffectsModeling.config as config
-from MixedEffectsModeling.core.pathway_convergence import (
+from MixedEffectsModeling.PerSamplePathwayAnalysis.pathway_convergence import (
     load_pathway_library, load_symbol_vocab, run_phenotype, run_phenotype_directional, slugify,
 )
 
-ZDIR = Path(__file__).resolve().parent / "Z_scores_mixed"
+ZDIR = config.ZSCORES_MIXED_DIR
 PCDIR = config.PATHWAY_CONV_DIR
 PHENOTYPES = [
     "Tuberculosis", "Pancreatitis", "Pancreatic Cancer", "Pre-eclampsia",
@@ -62,5 +62,5 @@ if __name__ == "__main__":
 
     pd.DataFrame(results).to_csv(PCDIR / "batch_summary.csv", index=False)
     pd.DataFrame(results_dir).to_csv(PCDIR / "batch_summary_directional.csv", index=False)
-    print("done, summary written to PathwayConvergence/batch_summary.csv "
+    print("done, summary written to PerSamplePathwayAnalysis/batch_summary.csv "
           "and batch_summary_directional.csv", flush=True)

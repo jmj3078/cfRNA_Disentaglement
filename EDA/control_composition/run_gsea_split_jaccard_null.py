@@ -26,7 +26,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import config
 from MixedEffectsModeling.Benchmark.db_hit_compare import ensg_to_symbol, gsea_prerank
-from MixedEffectsModeling.core.pathway_convergence import load_pathway_library, load_symbol_vocab
+from MixedEffectsModeling.PerSamplePathwayAnalysis.pathway_convergence import load_pathway_library, load_symbol_vocab
 
 DESIGNS = ["no_covariate", "ruvg_k2"]
 DISEASE = "Pancreatic Cancer"
