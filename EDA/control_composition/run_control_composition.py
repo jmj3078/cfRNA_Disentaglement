@@ -113,7 +113,7 @@ def build_cache():
 
 
 def platelet_mask(gene_names):
-    """Same control set as EDA/VariousNormalizationMethods_OpenAccess.R."""
+    """Same control set as EDA/control_composition/VariousNormalizationMethods_OpenAccess.R."""
     markers = pd.read_csv(MARKER_TSV, sep="\t")
     syms = set(markers.loc[markers["cell type"] == "Platelets", "official gene symbol"])
     return np.isin(gene_names, list(syms))

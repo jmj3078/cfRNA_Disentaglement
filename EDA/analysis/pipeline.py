@@ -8,16 +8,14 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import scipy.sparse as sp
-from scipy.stats import median_abs_deviation
-from scipy.stats import rankdata, t as t_dist, ks_2samp
-from statsmodels.nonparametric.smoothers_lowess import lowess
 
-_ROOT = Path(__file__).resolve().parent.parent
+_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from config import PARAMS
-from analysis_plot import (
+from analysis.bias_metrics import DEFAULT_METRICS
+from analysis.plot_pca_rda import (
     plot_pca_scree_and_bias,
     plot_pca_scatter_grid,
     plot_rda_unique_heatmap,
@@ -27,170 +25,6 @@ from analysis_plot import (
     plot_hc_rda_results,
 )
 
-DEFAULT_METRICS = [
-    "gc_bias_score",
-    "len_bias_score",
-    "platelet_score",
-    "log1p_total_counts",
-]
-
-# ---------------------------------------------------------------------------
-# Module-level sparse helpers
-# ---------------------------------------------------------------------------
-
-def _get_n80_sparse(matrix):
-    if not sp.isspmatrix_csr(matrix):
-        matrix = sp.csr_matrix(matrix)
-
-    n80 = np.zeros(matrix.shape[0])
-    for i in range(matrix.shape[0]):
-        row_data = matrix.data[matrix.indptr[i]:matrix.indptr[i + 1]]
-        row_data = row_data[row_data > 0]
-        if len(row_data) == 0:
-            continue
-        cumsum = np.cumsum(np.sort(row_data)[::-1])
-        if cumsum[-1] <= 0:
-            continue
-        n80[i] = np.argmax(cumsum >= cumsum[-1] * 0.8) + 1
-    return n80
-
-
-def _compute_score_sparse(X_csr, feat_vals, n_bins=None, loess_frac=None, outlier_pct=None):
-    n_bins = n_bins or PARAMS["n_bins"]
-    loess_frac = loess_frac or PARAMS["loess_frac"]
-    outlier_pct = outlier_pct or PARAMS["outlier_pct"]
-
-    feat_vals = np.array(feat_vals, dtype=float)
-    scores = []
-
-    for i in range(X_csr.shape[0]):
-        row_data = X_csr.data[X_csr.indptr[i]:X_csr.indptr[i + 1]]
-        row_indices = X_csr.indices[X_csr.indptr[i]:X_csr.indptr[i + 1]]
-        pos_mask = row_data > 0
-        valid_expr = row_data[pos_mask]
-        valid_indices = row_indices[pos_mask]
-
-        if len(valid_expr) < PARAMS["min_expressed"]:
-            scores.append(0.0)
-            continue
-
-        q_thresh = np.percentile(valid_expr, outlier_pct)
-        keep = valid_expr <= q_thresh
-        final_expr = valid_expr[keep]
-        final_feat = feat_vals[valid_indices[keep]]
-
-        df_tmp = pd.DataFrame({"expr": final_expr, "feat": final_feat})
-        try:
-            df_tmp["bin"] = pd.qcut(df_tmp["feat"], q=n_bins, duplicates="drop")
-        except ValueError:
-            scores.append(0.0)
-            continue
-
-        bin_stats = (
-            df_tmp.groupby("bin", observed=True)
-            .agg({"expr": "median", "feat": "mean"})
-            .dropna()
-        )
-        if len(bin_stats) < 2:
-            scores.append(0.0)
-            continue
-
-        smoothed = lowess(bin_stats["expr"], bin_stats["feat"], frac=loess_frac, it=0)
-        curve_disp = median_abs_deviation(smoothed[:, 1], scale="normal")
-        total_disp = median_abs_deviation(final_expr, scale="normal")
-        scores.append(curve_disp / total_disp if total_disp > 0 else 0.0)
-
-    return np.array(scores)
-
-
-# ---------------------------------------------------------------------------
-# Public functions
-# ---------------------------------------------------------------------------
-
-def calculate_diversity_ratio(adata, gene_type_col="GeneType", coding_label="protein_coding"):
-    X = adata.X
-    print("Calculating NG80 (sparse)...")
-    ng80 = _get_n80_sparse(X)
-
-    print(f"Calculating NP80 (subset: {coding_label})...")
-    if gene_type_col in adata.var.columns:
-        is_coding = (adata.var[gene_type_col] == coding_label).values
-        if np.sum(is_coding) == 0:
-            print(f"  [Warning] No genes with type '{coding_label}'. NP80 set to 0.")
-            np80 = np.zeros(adata.n_obs)
-        else:
-            np80 = _get_n80_sparse(X[:, is_coding])
-    else:
-        print(f"  [Warning] Column '{gene_type_col}' not found. NP80 set to NaN.")
-        np80 = np.full(adata.n_obs, np.nan)
-
-    with np.errstate(divide="ignore", invalid="ignore"):
-        ratio = np80 / ng80
-        ratio[ng80 == 0] = 0
-
-    return pd.DataFrame(
-        {"NG80": ng80, "NP80": np80, "NP80_NG80_ratio": ratio},
-        index=adata.obs_names,
-    )
-
-
-def calculate_bias_metrics(
-    adata,
-    layer=None,
-    gene_type_col="GeneType",
-    target_type="protein_coding",
-    gc_col="GC_Percent",
-    len_col="log10_Length",
-    platelet_col="is_platelet",
-):
-    print(f"--- Calculating Bfias Metrics (layer: {layer or 'X'}) ---")
-
-    X_data = adata.layers[layer] if (layer and layer in adata.layers) else adata.X
-    if not sp.issparse(X_data):
-        X_data = sp.csr_matrix(X_data)
-    elif not sp.isspmatrix_csr(X_data):
-        X_data = X_data.tocsr()
-
-    metrics_df = pd.DataFrame(index=adata.obs_names)
-
-    if gene_type_col in adata.var.columns:
-        coding_mask = (adata.var[gene_type_col] == target_type).values
-        if not np.any(coding_mask):
-            print(f"  [Warning] No genes for type '{target_type}'. Using all genes.")
-            coding_mask = np.ones(adata.n_vars, dtype=bool)
-    else:
-        coding_mask = np.ones(adata.n_vars, dtype=bool)
-
-    subset_X = X_data[:, coding_mask]
-    subset_var = adata.var.iloc[coding_mask]
-
-    if gc_col in subset_var.columns:
-        print("  > GC bias (LOESS)...")
-        metrics_df["gc_bias_score"] = _compute_score_sparse(subset_X, subset_var[gc_col])
-    else:
-        print(f"  [Skip] GC column '{gc_col}' not found.")
-
-    if len_col in subset_var.columns:
-        print("  > Length bias (LOESS)...")
-        metrics_df["len_bias_score"] = _compute_score_sparse(subset_X, subset_var[len_col])
-    else:
-        print(f"  [Skip] Length column '{len_col}' not found.")
-
-    if platelet_col in adata.var.columns:
-        platelet_genes = adata.var_names[adata.var[platelet_col]].tolist()
-        if platelet_genes:
-            print(f"  > Platelet score ({len(platelet_genes)} genes)...")
-            tmp = sc.AnnData(X=X_data, obs=adata.obs, var=adata.var)
-            sc.tl.score_genes(tmp, gene_list=platelet_genes, score_name="platelet_score")
-            metrics_df["platelet_score"] = tmp.obs["platelet_score"].values
-
-    print("Done.\n")
-    return metrics_df
-
-
-# ---------------------------------------------------------------------------
-# DataAnalysisPipeline
-# ---------------------------------------------------------------------------
 
 class DataAnalysisPipeline:
 
@@ -247,9 +81,6 @@ class DataAnalysisPipeline:
             if hasattr(obs, "cat"):
                 self.adata.obs[batch] = obs.cat.add_categories(["Unknown"])
             self.adata.obs[batch] = self.adata.obs[batch].fillna("Unknown")
-
-    def _prepare_metadata(self):
-        pass
 
     def get_active_metrics(self):
         return [m for m in self.target_metrics if m in self.adata.obs.columns]
@@ -697,7 +528,6 @@ class DataAnalysisPipeline:
                 "variance_partition": df_partition_all,
                 "r2_summary": df_r2_all}
 
-
     def analyze_hc_partial_rda(self, vars, batch_col="Batch_ID",
                                 hc_label="Healthy Control", phenotype_col="Phenotype_Processed",
                                 use_hvg=False, layer=None, save_path=None):
@@ -750,124 +580,3 @@ class DataAnalysisPipeline:
         plot_hc_rda_results(sr_unique, r2_all, batch_col, layer, unique_dict, save_path=save_path)
 
         return {"unique_contributions": sr_unique, "r2_all": r2_all}
-
-
-def compute_gene_wise_bias_rda(
-    adata,
-    bias_metrics,
-    layer="CPM_log1p",
-    phenotype_col="Phenotype_Processed",
-    target_labels="Healthy Control",
-    group_name="HC",
-    min_expressed_frac=0.1,
-):
-    print(f"\n--- [{group_name}] Vectorized Gene-wise Partial RDA ---")
-
-    if target_labels is None:
-        sample_mask = np.ones(adata.n_obs, dtype=bool)
-    elif isinstance(target_labels, str):
-        sample_mask = adata.obs[phenotype_col] == target_labels
-    else:
-        sample_mask = adata.obs[phenotype_col].isin(target_labels)
-
-    adata_sub = adata[sample_mask].copy()
-    obs_cols = [m for m in bias_metrics if m in adata_sub.obs.columns]
-    valid_obs_mask = adata_sub.obs[obs_cols].notna().all(axis=1)
-    adata_sub = adata_sub[valid_obs_mask].copy()
-
-    n_samples = adata_sub.n_obs
-    print(f"[{group_name}] Valid samples : {n_samples:,}")
-
-    X_expr = adata_sub.layers[layer]
-    if sp.issparse(X_expr):
-        X_expr = X_expr.toarray()
-    X_expr = X_expr.astype(np.float32)
-
-    expressed_frac = (X_expr > 0).mean(axis=0)
-    keep = expressed_frac >= min_expressed_frac
-    Y = X_expr[:, keep]
-    gene_names = adata_sub.var_names[keep].tolist()
-    n_genes = len(gene_names)
-    print(f"[{group_name}] Genes analyzed (≥{min_expressed_frac*100:.0f}% expressed) : {n_genes:,}")
-
-    Y_c = Y - Y.mean(axis=0)
-    sst = np.sum(Y_c ** 2, axis=0)
-    valid_gene_mask = sst > 1e-12
-
-    categorical_vars = {v for v in obs_cols if not pd.api.types.is_numeric_dtype(adata_sub.obs[v])}
-
-    def _get_design_matrix(vars_list):
-        return DataAnalysisPipeline._encode_design_matrix(adata_sub.obs, vars_list, categorical_vars)[0]
-
-    def _vectorized_adj_r2(design_X):
-        n, p_plus_1 = design_X.shape
-        p = p_plus_1 - 1
-        if n <= p + 1:
-            return np.zeros(n_genes)
-
-        Q, _ = np.linalg.qr(design_X, mode='reduced')
-        ss_reg = np.sum((Q.T @ Y_c) ** 2, axis=0)
-
-        r2 = np.zeros(n_genes)
-        r2[valid_gene_mask] = ss_reg[valid_gene_mask] / sst[valid_gene_mask]
-
-        r2_adj = 1.0 - (1.0 - r2) * (n - 1) / (n - p - 1)
-        return np.clip(r2_adj, 0.0, 1.0)
-
-    print(f"[{group_name}] Computing multivariate R² via orthogonal projection...")
-
-    X_all = _get_design_matrix(obs_cols)
-    r2_all = _vectorized_adj_r2(X_all)
-
-    gene_records = {"Gene": gene_names, "Joint_R2_All_Biases": r2_all}
-    sum_unique = np.zeros(n_genes)
-
-    for bias in obs_cols:
-        remaining = [v for v in obs_cols if v != bias]
-        if remaining:
-            X_minus = _get_design_matrix(remaining)
-            r2_minus = _vectorized_adj_r2(X_minus)
-        else:
-            r2_minus = np.zeros(n_genes)
-
-        unique_r2 = np.clip(r2_all - r2_minus, 0.0, 1.0)
-        gene_records[f"Unique_{bias}"] = unique_r2
-        sum_unique += unique_r2
-
-    gene_records["Shared_Biases"] = np.clip(r2_all - sum_unique, 0.0, 1.0)
-    gene_records["Unexplained"] = np.clip(1.0 - r2_all, 0.0, 1.0)
-
-    df_detail = pd.DataFrame(gene_records)
-    summary_data = []
-
-    n_joint_contaminated = np.sum(r2_all > 0.10)
-    summary_data.append({
-        "Variance_Component": "ALL_BIASES_COMBINED (Joint R²)",
-        "Max_R2": round(np.max(r2_all), 4),
-        "Mean_R2": round(np.mean(r2_all), 4),
-        "Genes_Highly_Biased": int(n_joint_contaminated),
-        "Threshold": "> 10%"
-    })
-
-    for bias in obs_cols:
-        unique_col = f"Unique_{bias}"
-        vals = df_detail[unique_col].values
-        n_contaminated = np.sum(vals > 0.05)
-
-        summary_data.append({
-            "Variance_Component": f"Unique: {bias}",
-            "Max_R2": round(np.max(vals), 4),
-            "Mean_R2": round(np.mean(vals), 4),
-            "Genes_Highly_Biased": int(n_contaminated),
-            "Threshold": "> 5%"
-        })
-
-    df_summary = pd.DataFrame(summary_data)
-
-    print("=" * 75)
-    print(" [Summary] Gene-level Contamination by Confounders")
-    print("=" * 75)
-    print(df_summary.to_string(index=False))
-    print("=" * 75)
-
-    return df_detail, df_summary
