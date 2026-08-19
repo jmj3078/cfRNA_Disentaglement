@@ -50,6 +50,84 @@ and cancer groups (Liver Cancer/Roskams-Hieter and Pre-eclampsia) -- plausibly i
 hits on the same growth-regulation pathway in two unrelated contexts (tumor proliferation vs
 trophoblast invasion) rather than a shared disease mechanism.
 
+## Oncogenesis-specificity of the recurring cancer terms
+
+The 4 recurring cancer terms above (`Mismatch repair`, `MAP3K8 (TPL2)-dependent MAPK1/3
+Activation`, `Cell Cycle`, `Telomere Extension By Telomerase`, `Glycolysis / Gluconeogenesis`)
+are pan-cancer proliferation/metabolism hallmarks, not mechanistically specific to
+oncogenesis (tumor-suppressor inactivation / oncogene activation) -- their citations are
+general reviews ("X is frequently altered across solid tumors"), not disease-specific driver
+mechanisms.
+
+A more directly oncogenic, reproducible signal exists but sits outside this section's
+exact-Term-match grouping: the **Hippo-pathway-inactivation / YAP1-TAZ-hyperactivation axis**,
+a bona fide tumor-suppressor-pathway-inactivation mechanism (not just "frequently altered").
+
+- `YAP1- And WWTR1 (TAZ)-stimulated Gene Expression` recurs, term-for-term, across **Liver
+  Cancer (Chen) + Pancreatic Cancer** -- 2 independent cancer cohorts, both NES positive
+  (+1.98 / +1.92), overlapping lead genes (WWTR1, YAP1, TEAD1/TEAD4), each with
+  disease-specific citations (PDAC: gemcitabine resistance/stemness via YAP1-c-Jun, PMID
+  37143164; aerobic glycolysis via YAP1-EGLN2, PMID 39647834). **This 2-cohort reproduction
+  holds on its own, without needing any merge** -- it is exactly the same kind of
+  exact-Term-match recurrence as the inflammatory triad or the pan-cancer hallmarks above.
+- A 3rd cancer cohort, Liver Cancer (Roskams-Hieter), independently kept the *upstream* half
+  of the same axis, `Signaling By Hippo` (NES +2.07, HBV-HCC YAP1-ubiquitylation-loss
+  mechanism, PMID 36643034) -- mechanistically the same pathway, but a different GSEA `Term`
+  string, so it does not join the YAP1/WWTR1 group under exact-match and was left out.
+  Folding it in would raise the reproduction to 3 cancer cohorts, but requires a judgment
+  call this document does not make automatically: `Signaling By Hippo` is *also* the literal
+  term shared with Pre-eclampsia in the cross-category note just above, in the **opposite**
+  NES direction (-2.01, YAP decrease in trophoblast, different biology) -- so merging on
+  the term string would conflate a real 3-cohort oncogenic reproduction with an unrelated
+  cross-category coincidence. Kept split for now; a manual axis-level merge (Hippo +
+  YAP1/WWTR1, cancer cohorts only, excluding Pre-eclampsia) is a defensible follow-up if the
+  downstream Sankey wants to represent this as one 3-cohort node.
+
+**Sample-level caveat (applies to all of the above):** re-checking `path_sig` (per-sample
+BH-FDR hypergeometric ORA on leading-edge genes, `PerSamplePathwayAnalysis/sig.pkl`) for the
+YAP1/WWTR1-Hippo axis gives 0% of samples significant in every one of the 3 cancer cohorts
+(0/10 Chen, 0/72 Pancreatic, 0/28 Roskams-Hieter) -- same pattern as the pan-cancer hallmark
+terms and the inflammatory triad. The reproduction above is a **group-level GSEA**
+(Stouffer-Z, FDR q<0.05) finding; it does not mean individual patients show a BH-significant
+hit on this pathway. Do not represent group-level reproducibility and sample-level
+significance as the same claim in the Sankey.
+
+## Inflammatory panel expansion (relaxed nominal-p cross-check, for the flagship Sankey)
+
+The strict rule above (exact `Term` match, both phenotypes' own FDR<0.05 kept list) gives only
+3 inflammatory pathways vs. 8 for cancer -- a count mismatch driven by group size (3
+inflammatory phenotypes vs. 6 cancer subtypes), not by inflammatory disease actually
+converging less. To build a size-matched 8-pathway panel for the flagship Sankey (patient ->
+gene -> pathway -> subtype -> category), each of the 25 TB/Pancreatitis/Pre-eclampsia
+FDR-kept terms was cross-checked against the *other two* phenotypes' full raw GSEA ranking
+(`Benchmark/gsea_cache/normative__<phenotype>.csv`, all 2054 terms, not just their own
+FDR<0.05 shortlist) for **nominal `NOM p-val` < 0.05** -- looser than the FDR-significance
+bar used everywhere else in this document, so treat panel membership below as suggestive
+convergence, not a corrected-significance claim the way the strict "kept" list is.
+
+5 terms cleared this bar and are genuinely core innate-immune/inflammatory mechanisms (not
+tangential organ-specific hits):
+
+| term | TB (own list?) | cross-phenotype nominal p |
+|---|---|---|
+| Neutrophil Extracellular Trap Formation | kept | Pancreatitis p=0.004, Pre-eclampsia p=0.000 (all 3 phenotypes) |
+| Bacterial Invasion Of Epithelial Cells | kept | Pancreatitis p<0.001 |
+| Regulation Of Actin Dynamics For Phagocytic Cup Formation | kept | Pancreatitis p<0.001 |
+| Chemokine Signaling Pathway (KEGG) | kept | Pancreatitis p<0.001 |
+| Interleukin-1 Family Signaling | kept | Pancreatitis p<0.001 |
+
+Other candidates that also cleared nominal p<0.05 were dropped as off-theme despite the
+numeric hit: Pre-eclampsia's `VEGFA-VEGFR2 Pathway`, `DNA Methylation`, and `Response To
+Elevated Platelet Cytosolic Ca2+` are vascular/epigenetic, not inflammatory-mechanism, and
+`Defective CFTR...`/`Metabolism Of Polyamines` (Pancreatitis) are organ-specific rather than
+a shared immune axis. `Signaling By Hippo` also clears nominal significance between
+Pancreatitis and Pre-eclampsia here (p=0.000/0.028) -- worth noting since it's the same term
+flagged above as "cross-category" against Liver Cancer/Roskams-Hieter, but excluded from this
+panel for the same off-theme reasoning.
+
+Final flagship inflammatory panel (8): Interferon Alpha/Beta Signaling, Interferon Gamma
+Signaling, Neutrophil Degranulation (strict, unchanged) + the 5 above.
+
 ## Caveats
 
 - **Liver Cancer (Chen et al., n=10)**: 82% of its FDR-significant GSEA terms (419/513, the
