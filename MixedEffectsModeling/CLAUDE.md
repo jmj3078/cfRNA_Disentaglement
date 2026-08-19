@@ -1,103 +1,46 @@
 ## Phase Objective
-Testing and validating Mixed Effect Modeling. Explicitly incorporates batch effects (omitted in prior models) via a random intercept, to evaluate structural validity and goodness-of-fit.
+Mixed Effect Modeling: normative model with an explicit random-intercept batch term, validated via CV/LOBO/PPC before use for disease Z-scores.
 
-## Current Modeling Methodology (v3, 2026-07-28)
+## Current Methodology (v3)
 
-Design record (motivation, measurements): `docs/superpowers/specs/2026-07-27-eb-dispersion-cook-outlier-design.md`.
-Full mathematical derivation: `docs/superpowers/specs/2026-07-28-v3-mathematical-reference.md`.
+Params live in `config.py`: `FIT_PARAMS` (`tau2_max=3.0`, `pcis_cut=2.25`, `disp_intercept_max=10.0`, `max_outlier_frac=0.05`), `NZ_A_MAX=31` (individual-vs-pooled routing cutoff), `EB_PARAMS`, `SPIKE_PARAMS`.
 
-### 1. Standard Gene Modeling (Two-Stage Cascade)
-
-Per-gene loop: fit stage -> PCIS outlier removal + 1 refit (inside the stage, before any squeeze) -> demote on failure. After ALL genes finish the cascade, one global pass squeezes every gene's dispersion intercept toward the trend -- squeeze depends on the full-cohort residual spread, so it cannot run per-gene mid-cascade.
-
-**`nbi_full_eb`**: $\log\mu_i=\beta_0+\sum_k\beta_kX_{ik}+b_j$; $\log\theta_i=\gamma_0+\sum_k\gamma_kX_{ik}$, slopes under EB prior `normal(0,tau_k)`, intercept squeezed post-cascade.
-**`nbi_intercept_eb`** (on stage-1 failure): same mean submodel; $\log\theta_i=\gamma_0$ only, squeezed post-cascade.
-Failing both -> `route="excluded"`. Reject reasons kept per stage (`nbi_full_eb_reject_reason` / `nbi_intercept_eb_reject_reason`) for auditability.
-
-v2's `nbi_disp_intercept` (3rd stage) and `nb_fixed` (hard trend-fixed stage) are gone: with a correctly-calibrated slope prior, `nbi_disp_intercept` was indistinguishable from `nbi_full_eb`, and `nb_fixed` is now just the `SE->inf` limit of the EB squeeze below, not a separate code path.
+### 1. Standard Gene Modeling (Two-Stage Cascade, `core/glmm_fit.R` + `core/glmm_helpers.R`)
+Per-gene: fit `nbi_full_eb` (mean submodel `log(mu)=Xb+b_j[batch]`, dispersion slopes under EB prior, intercept squeezed post-cascade) -> on failure fall back to `nbi_intercept_eb` (dispersion intercept-only) -> PCIS outlier removal + 1 refit -> failing both routes = `route="excluded"`.
 
 ### 1a. EB Dispersion Shrinkage (`core/eb_shrinkage.py`)
-
-limma/edgeR moment decomposition: `tau^2 = max(0, (1.4826*MAD(phi_hat))^2 - median(SE^2))` (MAD/median, not variance/mean, so a few near-divergent genes can't inflate tau and silently disable shrinkage).
-
-* **Slopes**: `--mode calib` fits `nbi_full_eb` with no dispersion prior on a stratified gene subsample (`EB_PARAMS`, `calib_fits.csv`), `tau_k` read off the across-gene slope spread per covariate. Cached to `disp_prior.json`. Measured 0.10-0.36 (v2's blanket 0.05 was too tight).
-* **Intercept**: not penalized during the fit. Squeezed in Python after the full cascade: `log_theta_post = (hat/SE_0^2 + trend/tau_d^2)/(1/SE_0^2 + 1/tau_d^2)`, pooled across both stages for a stable `tau_d`. `SE_0=NaN` -> `SE^2=inf` -> squeeze collapses to the trend exactly. Overwrites `disp_coef[0]`; `log_theta_raw` keeps the pre-squeeze value.
-
-*Known approximation:* mean coefficients / `tau2` are not refit under the squeezed dispersion (not the joint posterior mode) -- same as limma/edgeR, and it's `alpha` entering the RQR that governs Z calibration.
-
-### 1a-2. Dispersion Trend (`core/dispersion_trend.py:build_trend_from_fits`)
-
-Prior mean for the intercept squeeze AND the variance PCIS is measured against -- both features are gated by this being correct. `build_trend_from_fits`: lowess of `log(alpha_fit)` on `log(mean)` over the calibration run's own **covariate-adjusted** dispersions (frac=0.3, it=3 bisquare robustifying iterations). `build_trend` (raw-count MoM, ignores covariates/batch) is kept only as a diagnostic reference -- it conflates true dispersion with covariate-driven mean variance and over-estimates badly at high expression (see math reference for the decomposition).
-
-Batch enters the mean submodel only (`(1|batch__)`), not dispersion -- a fixed batch factor would give HC's 5 singleton batches a free parameter each, deflating exactly the dispersion the trend measures. `score()` never needs batch: `u~N(0,tau^2)` is marginalized by Gauss-Hermite, so unseen batches (CV, LOBO, disease) need no BLUP.
-
-`core/trend_report.py` runs on every calibration fit, writes `Figures/dispersion_trend.png` + `trend_residuals.csv` -- no trend is ever deployed without its calibration record.
-
-`training_summary.csv` has `tau2_collapsed` (`tau2 < 1e-4`, ~30% of genes) -- the R-side `singular` flag (`pdHess` FALSE) does not catch this.
-
-### 1a-3. `tau2_max = 3.0` (2026-07-28)
-
-Decoupled from `beta_explode_thr ** 2` (=9). That value was a numeric divergence guard; this one is a **power** criterion, and conflating them hid the distinction. Both stages gate on it (`is_converged`, `glmm_helpers.R:155,166`), and `fit_one_cascade` returns at `nbi_intercept_eb` regardless of `ok`, so failing both -> `route="excluded"`.
-
-Motivation: a large `tau2` does **not** break calibration. Per-tau2-bin held-out-style checks (`0_insample_analysis.ipynb` sec. 3) give `rqr_msq` 0.98-1.03, `cov_95` 0.957-0.963, 95%-exceedance 0.046-0.051 at *every* bin including `tau2 > 5` -- the marginal `pred_var` blows up as `exp(2*tau2)` while the quantiles barely move, so the PPC variance panel is a moment artifact, not miscalibration. What a large `tau2` actually costs is detection power: the predictive distribution widens until the count needed for `|z|=3` leaves the observable range. Section 13 of that notebook computes `y_crit` (the z=3 count) per gene and compares it to the largest count ever observed for that gene; the undetectable rate is 0% below tau2~0.5 and climbs to 15-34% above 3.
-
-Caveats kept deliberately: the cut removes 305 genes (1.6%) of which only ~21% are demonstrably undetectable -- no `tau2` threshold separates the two populations cleanly (precision never exceeds 30% at any cutoff). It is accepted because the collateral is low-expression (median mu ~0.05), not because the threshold is sharp. A direct `y_crit`-based filter was evaluated and **rejected**: it is cohort-bound (it cannot tell "model too wide" from "no such sample in this cohort") and overlaps a depth-based criterion on only 27 of 113 genes.
+Slope priors (`tau_k`) fit via limma/edgeR-style moment decomposition on a calibration subsample, cached to `disp_prior.json`. Intercept squeezed toward `core/dispersion_trend.py`'s lowess trend (`build_trend_from_fits`, covariate-adjusted) after the full cascade — `build_trend` (raw-count, no covariates) is diagnostic-only, do not deploy it.
 
 ### 1b. PCIS Outlier Removal (`core/glmm_helpers.R:pcis_outliers`)
-
-**PCIS = Prior-Conditioned Impact Score.** Cook-shaped, deliberately not Cook's distance:
-
-```
-w_i    = mu_i / (1 + alpha_trend * mu_i)               NB2 log-link IRLS weight
-M      = [Xf Z],  P = blkdiag(0_p, I/tau^2)            fixed design + batch design
-H      = W^1/2 M (M'WM + P)^-1 M' W^1/2,  p_eff = tr(H)
-r_i    = (y_i - mu_i) / sqrt(mu_i + alpha_trend * mu_i^2)
-PCIS_i = r_i^2 / p_eff * h_ii / (1 - h_ii)^2
-```
-
-Two departures from Cook's distance, both forced by measurement (full derivation + numbers in the math reference):
-1. **Variance = trend alpha, not the gene's own fit.** A freely-estimated dispersion lets 20x-scale outliers inflate their own gene's alpha and mask themselves (self-masking, same mechanism externally studentized residuals fix in OLS). Trend alpha is "external" to the whole gene (drawn from ~19,000 other genes), which also survives multiple simultaneous outliers within one gene -- something per-observation deletion diagnostics (ESR, Cook's D) cannot.
-2. **Leverage from a prior-penalized mixed design**, not fixed-effects-only -- `mu` already contains the BLUP, so using only `X` for the hat matrix ignores ~40% of effective model complexity. `tau2 -> 0` sends the penalty to infinity, so `p_eff -> p` automatically (the ~30% of genes with collapsed batch variance).
-
-Because the variance isn't the fitted model's own, PCIS has no F reference distribution -- **the cut is a fixed constant, `config.FIT_PARAMS["pcis_cut"] = 2.28`**, read off an empirical null (`PCIS_Calibration/`, README + math reference sec. 5): each gene's own fitted params regenerate clean counts, refit under the same prior, recompute PCIS; the cut is the value where null-driven removals (noise) fall below the observed real removal rate, at a target per-observation population false-alarm rate of 1e-4. Not `qf(0.99, p_eff, n-p_eff)` (DESeq2 convention, numerically close by coincidence but has no theoretical basis for this statistic).
-
-Observations exceeding the cut are **dropped** (largest first, at most `floor(0.05*n)`) and the stage refit once with `droplevels` (HC has 5 singleton batches). Not replaced by a trimmed mean -- fabricates counts, biases dispersion downward.
-
-**Known blind spot**: contamination gets absorbed into dispersion *slopes*, not the intercept, so PCIS is weak for low-expression/high-alpha genes (a large count is plausible under high dispersion) and strongest for well-expressed, low-alpha genes. Conservative filter for gross contamination, not a general outlier detector.
+Cook-shaped statistic using trend alpha (not the gene's own fit, avoids self-masking) and mixed-model leverage. Cut is a fixed empirical constant (`pcis_cut`, calibrated in `PCIS_Calibration/`), not an F-distribution quantile. Drops flagged observations (largest first, capped at `max_outlier_frac`) and refits once. Known blind spot: weak for low-expression/high-alpha genes.
 
 ### 1c. Per-Gene SHASH Calibration (`core/calibration.py`)
-Unchanged from v2. Held-out HC Z-scores must be N(0,1) for downstream FDR calibration; genes with real skew/kurtosis in their RQR distribution break it. Fits a SHASH (sinh-arcsinh, Jones & Pewsey 2009) per gene to held-out Z-scores, reports naive-vs-corrected 95%-exceedance / skew-kurtosis / BH-FDR reject rate on held-out HC (a true null).
+Fits SHASH to held-out HC Z-scores per gene so downstream FDR calibration holds; reports naive-vs-corrected exceedance/skew-kurtosis/BH-FDR on held-out HC.
 
----
-
-### 2. Pooled GLMM (For Low-Expression Genes)
-Rare genes with a severe deficit of non-zero observations, stacked into a single tensor sharing fixed effects ($\beta$) and batch variance ($\sigma^2_{batch}$) at the group level:
-
-$$\log(\mu_{i,g}) = \log(\bar{Y}_{g,HC} + \epsilon) + \beta_0 + \sum_{k=1}^{10}\beta_k X_{ik} + b_j$$
-
-Poisson first; if Pearson-residual overdispersion ratio exceeds a threshold (e.g. 2.0), refit NB2 with $\log\theta=\gamma_0$.
-
-**`nz_a_max = 25`** (2026-07-28, provisional -- pending CV, see below). Set empirically from the completed `nz_a_max=0` run (`engine_state_mixed_tau9_nopool_20260728/`, every gene forced through the individual cascade), which makes the pooling boundary measurable rather than assumed: the cutoff should sit where individual fitting actually stops working.
-
-Convergence failure by nz: 92% (1-5) / 62% (6-10) / 42% (11-15) / 18% (16-20) / 10% (21-25) / 8% (26-30) / 4.5% (31-40) / 1.5% (41-50). The knee is at nz~20-25; above it individual fits essentially always converge.
-
-Raising the cutoff past the knee is a losing trade, because pooling *downgrades* a gene that fits individually -- it loses its own $\beta$ to the shared one, which is the whole premise of per-gene normative modeling. Rescued (would fail individually) vs downgraded (fits fine) at each cutoff: 4.70 at nz 10, 2.41 at 15, 1.57 at 20, **1.21 at 25**, 0.97 at 30, 0.74 at 40. At 40, 1,423 of the 2,475 pooled genes (58%) were fitting fine. Going 25 -> 40 buys 90 more rescues for 626 more downgrades.
-
-Failures that remain above nz~25 are mostly `tau2 > tau2_max`, not non-convergence, and **pooling does not fix those** -- the pooled model keeps the same $b_j$ random intercept. So there is nothing to gain there.
-
-**Unverified assumption**: all of the above counts a low-nz gene as "rescued" on the premise that the pooled fit succeeds and is calibrated. `train_pool`/`glmm_fit_pool.R` have never been run on real HC data. Until CV confirms the pool route's held-out Z is calibrated, the threshold argument is conditional.
-
-**Tension with the earlier estimate**: a 2026-07-24 v2-engine analysis (`individual_fit_success.csv`, see [[project_mixed_effects_pooling_threshold]]) put the boundary near nz~50 from *per-fold* convergence (all 5 CV folds converging, ~554 training samples each) -- a strictly harder bar than the single full-cohort fit measured here (676 samples), and on a different cascade. The upcoming CV run measures the fold-level rate on the current engine directly and is what should settle the gap; if fold-level convergence at nz 25-50 turns out poor, raise the cutoff.
+### 2. Pooled GLMM (`core/glmm_fit_pool.R`, low-`nz` genes only)
+Genes below `NZ_A_MAX` share fixed effects + batch variance in one stacked tensor (Poisson, NB2 fallback on overdispersion). Route chosen because individual-fit convergence collapses below this `nz`; do not raise the cutoff without re-checking per-fold CV convergence.
 
 ---
 
 ## Development & Repository Constraints
+* **Directory scopes** — stay within these, no modifications outside:
+  * `/core`: modeling engine only (`glmm_helpers.R`, `glmm_fit.R`, `eb_shrinkage.py`, `glmm_fit_pool.R`, `dispersion_trend.py`, `trend_report.py`, `marginal_rqr.py`, `model_engine_mixed.py`, `calibration.py`, `shash.py`, `ood_filter.py`, `pcis_null.R`, `pcis_calibration.py`, `run_engine.py`). This is the set of code that actually drives the model — treat it as load-bearing, not scratch space: no edits without an explicit reason and no exploratory/analysis code mixed in. Write it as if it will be packaged and imported standalone later (no notebook-only globals, no hardcoded paths outside `config.py`, no cwd-relative assumptions) even though it isn't packaged yet.
+  * `/validation`: CV/LOBO/PPC (`cv_engine.py`, `lobo_engine.py`, `lobo_mmd.py`, `ppc_simulate.py`, `pool_threshold_sweep.py`)
+  * `/_legacy`: pre-2026-07-25 engine, reference only — do not import/modify.
+  * Root `.ipynb`: numbered pipeline notebooks (`1_cv_analysis` ... `6_sankey_convergence`), thin runners only.
+* **Coding standards:** concise, space-efficient; minimal English-only comments; notebook headers stay minimal (numeric index + brief title).
 
-* **Iterative Refinement:** methodology is experimental; expect structural revisions.
-* **Directory Enforcement:**
-  * `/core`: modeling engine logic only. `glmm_helpers.R`(per-gene fit + PCIS outlier removal + pooled-GLM primitives) · `glmm_fit.R`(CLI, `--mode cascade|calib|fixed_stage`, `--disp-prior`, `--fit-params`) · `eb_shrinkage.py`(EB prior sd + intercept squeeze) · `glmm_fit_pool.R`(pooled-GLM CLI, unused this round) · `dispersion_trend.py`(`build_trend_from_fits` canonical; `build_trend` diagnostic-only) · `trend_report.py`(always-on trend/prior figure) · `marginal_rqr.py`(tau2-marginalized RQR/log-likelihood, Gauss-Hermite) · `model_engine_mixed.py`(`NormativeModelEngineMixed`/`GeneRecordMixed`) · `calibration.py`(per-gene SHASH) · `pcis_null.R`(PCIS empirical-null simulator) · `pcis_calibration.py`(`run_all()` -> `PCIS_Calibration/`: null PCIS rate table + histogram) · `run_engine.py`(entry point: `python core/run_engine.py [--limit N] [--calib-genes N] [--resume]`, writes `engine_state_mixed/`)
-  * `/validation`: large-scale validation/auditing. `cv_engine.py`(5-fold CV, per-`(gene,fold)` logging to `fold_stats.csv` -- written, **not yet executed**)
-  * `/_legacy/core_v1`, `/_legacy/validation_v1`: pre-2026-07-25 4-stage engine, reference only -- do not import/modify.
-  * **Root (`.ipynb`):** all visualizations/tabular summaries/analytical reviews go in notebooks in the cwd.
-  * No modifications outside these scopes.
-* **Coding Standards:** concise/space-efficient code; minimal English-only comments (core functionality or comparisons with prior code only); notebook headers stay minimal (numeric index + brief title).
+## Directory & Naming Convention
+
+This directory is the reproducibility root: numbered root notebooks are the only entry points a reader replays; everything else is engine code, one-off scripts, or a section's output cache.
+
+* **Root notebooks (`N_topic.ipynb`)**: one per pipeline stage, numbered in run order (currently `1_cv_analysis` ... `6_sankey_convergence`). Thin runners only — import from `core/`/`validation/`, no inline modeling logic. A new analysis stage = next integer + a new section directory (below), never inserted mid-sequence (renumber only if truly reordering the pipeline).
+* **Section output directories (`PascalCase`, e.g. `PerSamplePathwayAnalysis`, `SignalTrendAnalysis`, `PCIS_Calibration`, `Benchmark`)**: one per analysis topic, holding that topic's figures (`Figures/` subdir), cached csv/pkl, and any one-off scripts specific to it (`run_*.py`, e.g. `PerSamplePathwayAnalysis/run_pathway_convergence_batch.py`). One-off/exploratory scripts live in the section dir they support, never in `core/` or `validation/`. Every such directory must be registered as a path constant in `config.py` (`_HERE / "DirName"`) — no hardcoded path strings in notebooks.
+* **Engine raw-output directories (`<Thing>_mixed`, e.g. `CV_Results_mixed`, `LOBO_Results_mixed`, `Z_scores_mixed`, `engine_state_mixed`)**: fixed outputs of `core/run_engine.py` / `validation/cv_engine.py` / `validation/lobo_engine.py` — the `_mixed` suffix tags the mixed-effects engine version. This set is closed; do not add ad-hoc `_mixed` dirs for analysis — those go under the PascalCase convention above instead.
+* Do not create new top-level directories outside these two families without updating this section.
+
+## Visualization Workflow
+
+* **Style:** every figure goes through `apply_style()` (see root `CLAUDE.md`). Never override fontsize, spines, or other theme parameters ad hoc in a plotting call — if the current theme is wrong for a figure, fix it in `viz_style.py` itself so the change applies everywhere, don't patch around it locally.
+* **Draft-first, user-directed:** Claude cannot see the rendered plot, and figure design here is the user's call, not an autonomous one. Before writing any non-trivial visualization code: propose a concrete plan (chart type, axes/encoding, what's highlighted) and get explicit user sign-off — do not guess and ship a "final" version. Treat the first implementation as a draft; keep iterating on the user's concrete feedback until they confirm it's settled, rather than assuming agreement from silence or moving on after one round.
+* **Ask, don't assume:** where the plan has a real design choice (chart type, what to emphasize, grouping/ordering, color/legend use, what to omit), ask the user directly instead of picking silently — these are subjective calls the user needs to make, not defaults to fill in. Keep questions concrete and answerable (offer options) rather than open-ended.
