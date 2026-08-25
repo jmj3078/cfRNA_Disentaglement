@@ -15,6 +15,7 @@
 *.parquet
 *.csv.gz
 *.key
+*.rds
 #CLAUDE
 .claude
 CLAUDE.md
@@ -23,3 +24,4 @@ CLAUDE.md
 _external/
 
 /논문화/
+/특허/
