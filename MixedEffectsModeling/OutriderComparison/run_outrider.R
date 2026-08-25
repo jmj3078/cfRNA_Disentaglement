@@ -26,8 +26,36 @@ ods <- estimateSizeFactors(ods)
 set.seed(42)
 q <- 20
 bp <- MulticoreParam(workers = 4, stop.on.error = FALSE)
-ods <- controlForConfounders(ods, q = q, iterations = 5, BPPARAM = bp)
-ods <- fit(ods, BPPARAM = bp)
+
+# Neither controlForConfounders() nor fit() has a partial-success mode -- ANY gene's
+# per-gene NB optimization failing (L-BFGS-B non-finite) aborts the WHOLE call. Parse the
+# raised bplist error for the failing gene indices, drop those genes, and retry (looping
+# in case a new gene fails once the offending ones are gone).
+retry_drop <- function(f, ods, ...) {
+  n_dropped <- 0
+  repeat {
+    msg <- NULL
+    res <- tryCatch(list(ok = TRUE, val = f(ods, ...)),
+                    error = function(e) { msg <<- conditionMessage(e); list(ok = FALSE) })
+    if (res$ok) return(list(ods = res$val, n_dropped = n_dropped))
+    m <- regmatches(msg, regexpr("element index: [0-9, ]+", msg))
+    idx_str <- sub("element index: ", "", m)
+    bad <- as.integer(trimws(strsplit(idx_str, ",")[[1]]))
+    bad <- bad[!is.na(bad)]
+    if (length(bad) == 0) stop(msg)
+    cat(sprintf("dropping %d gene(s) that fail NB optimization: %s\n", length(bad),
+               paste(rownames(ods)[bad], collapse = ", ")))
+    n_dropped <- n_dropped + length(bad)
+    ods <- ods[-bad, ]
+  }
+}
+
+r1 <- retry_drop(controlForConfounders, ods, q = q, iterations = 5, BPPARAM = bp)
+ods <- r1$ods
+r2 <- retry_drop(fit, ods, BPPARAM = bp)
+ods <- r2$ods
+n_dropped <- r1$n_dropped + r2$n_dropped
+cat(sprintf("total genes dropped for NB fit failure: %d (out of filtered set)\n", n_dropped))
 ods <- computePvalues(ods, alternative = "two.sided")
 ods <- computeZscores(ods)
 
