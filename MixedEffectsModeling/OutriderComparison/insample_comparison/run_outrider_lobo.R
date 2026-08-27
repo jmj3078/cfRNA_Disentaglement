@@ -4,21 +4,32 @@ suppressPackageStartupMessages({
   library(jsonlite)
 })
 
-dir <- "/project/cfRNA_NormativeModeling/MixedEffectsModeling/OutriderComparison"
+dir <- "/project/cfRNA_NormativeModeling/MixedEffectsModeling/OutriderComparison/insample_comparison"
 
 hc_counts <- fread(file.path(dir, "hc_counts.csv"))
 hc_genes <- hc_counts[[1]]
 hc_mat <- as.matrix(hc_counts[, -1]); rownames(hc_mat) <- hc_genes
+hc_meta <- fread(file.path(dir, "hc_meta.csv"))
+stopifnot(identical(colnames(hc_mat), hc_meta$sample))
+
+dis_counts <- fread(file.path(dir, "disease_counts.csv"))
+dis_genes <- dis_counts[[1]]
+dis_mat <- as.matrix(dis_counts[, -1]); rownames(dis_mat) <- dis_genes
+stopifnot(identical(hc_genes, dis_genes))
 
 gene_len <- fread(file.path(dir, "gene_lengths.csv"))
 setnames(gene_len, c("gene", "length"))
 gene_len <- gene_len[match(hc_genes, gene_len$gene)]
 stopifnot(identical(gene_len$gene, hc_genes))
 
-folds <- fromJSON(file.path(dir, "cv_folds.json"))
+test_meta <- fromJSON(file.path(dir, "lobo_test_meta.json"))
+batches <- names(test_meta)
+
 q <- 20
 bp <- MulticoreParam(workers = 4, stop.on.error = FALSE)
 
+# Same retry-drop as run_outrider.R: neither controlForConfounders() nor fit() has a
+# partial-success mode -- ANY gene's L-BFGS-B divergence aborts the whole call.
 retry_drop <- function(f, ods, ...) {
   n_dropped <- 0
   repeat {
@@ -38,12 +49,23 @@ retry_drop <- function(f, ods, ...) {
   }
 }
 
-for (fi in names(folds)) {
-  cat(sprintf("=== fold %s ===\n", fi))
-  train_names <- folds[[fi]]$train
-  test_names <- folds[[fi]]$test
-  mat <- hc_mat[, c(train_names, test_names), drop = FALSE]
+out_rows <- list()
 
+for (b in batches) {
+  safe <- gsub(" ", "_", b)
+  cat(sprintf("=== %s ===\n", b))
+  test_names <- test_meta[[b]]$test_names
+  test_is_hc <- test_meta[[b]]$test_is_hc
+
+  train_hc_names <- hc_meta$sample[hc_meta$batch != b]
+  train_mat <- hc_mat[, train_hc_names, drop = FALSE]
+
+  test_from_hc <- intersect(test_names, colnames(hc_mat))
+  test_from_dis <- intersect(test_names, colnames(dis_mat))
+  test_mat <- cbind(hc_mat[, test_from_hc, drop = FALSE], dis_mat[, test_from_dis, drop = FALSE])
+  test_mat <- test_mat[, test_names, drop = FALSE]  # restore original order
+
+  mat <- cbind(train_mat, test_mat)
   ods <- OutriderDataSet(countData = mat)
   mcols(ods)$basepairs <- gene_len$length
   ods <- filterExpression(ods, filterGenes = TRUE, fpkmCutoff = 1)
@@ -54,16 +76,12 @@ for (fi in names(folds)) {
   ods <- r2$ods
   cat(sprintf("  n_genes final=%d, dropped=%d\n", nrow(ods), r1$n_dropped + r2$n_dropped))
   ods <- computeZscores(ods)
-
-  z <- t(as.matrix(assay(ods, "zScore")))
-  mu <- t(normalizationFactors(ods))
-  th <- theta(ods)
-  y <- t(counts(ods))
+  z <- t(as.matrix(assay(ods, "zScore")))  # samples x genes
 
   z_test <- z[test_names, , drop = FALSE]
-  mu_test <- mu[test_names, , drop = FALSE]
-  y_test <- y[test_names, , drop = FALSE]
-  saveRDS(list(z = z_test, mu = mu_test, y = y_test, theta = th, genes = rownames(ods)),
-          file.path(dir, paste0("cv_fold", fi, "_full.rds")))
+  saveRDS(z_test, file.path(dir, paste0("z_test_", safe, ".rds")))
+  out_rows[[b]] <- data.table(batch = b, sample = test_names, is_hc = test_is_hc)
 }
+
+fwrite(rbindlist(out_rows), file.path(dir, "outrider_lobo_membership.csv"))
 cat("ALL DONE\n")

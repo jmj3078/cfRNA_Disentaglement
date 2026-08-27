@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import pearsonr, spearmanr
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from MixedEffectsModeling.validation.ppc_simulate import ppc_moment_pvalues
 
 DIR = Path(__file__).parent
@@ -47,7 +47,7 @@ def pvalue_summary(y_mu_alpha_tau2_iter, n_genes, seed0=2000):
 
 
 def our_engine_iter():
-    d = pickle.load(open(DIR.parent / "CV_Results_mixed" / "cv_ppc.pkl", "rb"))
+    d = pickle.load(open(DIR.parent.parent / "CV_Results_mixed" / "cv_ppc.pkl", "rb"))
     for g, v in d.items():
         yield g, np.asarray(v["y"], float), np.asarray(v["mu"], float), np.asarray(v["alpha"], float), np.asarray(v["tau2"], float)
 
@@ -96,7 +96,7 @@ if __name__ == "__main__":
     else:
         print(f"already cached -> {out_outr}")
 
-    eng_calib = gene_level_calib_table(DIR.parent / "CV_Results_mixed" / "cv_calibration_moments.csv")
+    eng_calib = gene_level_calib_table(DIR.parent.parent / "CV_Results_mixed" / "cv_calibration_moments.csv")
     outr_calib = gene_level_calib_table(DIR / "outrider_cv_calibration_moments.csv")
     print("\nour engine calib_stats (full 19858g):", eng_calib)
     print("\nOUTRIDER calib_stats (12305g):", outr_calib)
@@ -110,7 +110,7 @@ if __name__ == "__main__":
 
     # our-engine calib_stats restricted to the same 12305-gene subset OUTRIDER covers, for a
     # like-for-like comparison alongside the full-19858 number.
-    eng_cal_full = pd.read_csv(DIR.parent / "CV_Results_mixed" / "cv_calibration_moments.csv")
+    eng_cal_full = pd.read_csv(DIR.parent.parent / "CV_Results_mixed" / "cv_calibration_moments.csv")
     outr_genes = pd.read_csv(DIR / "outrider_cv_calibration_moments.csv")["gene"]
     eng_cal_sub = eng_cal_full[eng_cal_full["gene"].isin(outr_genes)]
     sub_path = DIR / "our_engine_cv_calibration_moments_12305subset.csv"

@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from MixedEffectsModeling.validation.lobo_mmd import _mmd_permutation_test, _ref_centroid_direction
 
 DIR = Path(__file__).parent

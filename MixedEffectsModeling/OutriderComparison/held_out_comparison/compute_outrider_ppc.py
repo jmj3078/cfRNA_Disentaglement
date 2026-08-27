@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from MixedEffectsModeling.validation.ppc_simulate import simulate_marginal_nb
 
 DIR = Path(__file__).parent
