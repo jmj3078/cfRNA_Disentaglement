@@ -16,6 +16,7 @@
 *.csv.gz
 *.key
 *.rds
+*.gz
 #CLAUDE
 .claude
 CLAUDE.md
@@ -25,4 +26,3 @@ _external/
 
 /논문화/
 /특허/
-/GeneralRnaseqComparison/
